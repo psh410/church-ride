@@ -79,3 +79,73 @@ async def _send_discord_dm(username: str, message: str) -> bool:
 
     await client.start(DISCORD_BOT_TOKEN)
     return result["sent"]
+
+
+def send_discord_dms(messages: list[dict]) -> dict[str, bool]:
+    """Send multiple Discord DMs in a single batched client session.
+
+    Logging in to Discord's gateway is relatively expensive, so callers
+    sending several DMs at once (e.g. the notification agent) should use
+    this instead of calling send_discord_dm() in a loop.
+
+    Args:
+        messages: A list of dicts, each with "username" and "message"
+            keys.
+
+    Returns:
+        dict[str, bool]: Maps each username to whether its DM was sent
+            successfully.
+    """
+    try:
+        return asyncio.run(_send_discord_dms_batch(messages))
+    except Exception as exc:
+        logger.error("Unexpected error sending batched Discord DMs: %s", exc)
+        return {entry["username"]: False for entry in messages}
+
+
+async def _send_discord_dms_batch(messages: list[dict]) -> dict[str, bool]:
+    """Log in once, send every DM in `messages`, then log back out.
+
+    Args:
+        messages: A list of dicts, each with "username" and "message"
+            keys.
+
+    Returns:
+        dict[str, bool]: Maps each username to whether its DM was sent
+            successfully.
+    """
+    intents = discord.Intents.default()
+    intents.members = True
+
+    client = discord.Client(intents=intents)
+    results: dict[str, bool] = {entry["username"]: False for entry in messages}
+
+    @client.event
+    async def on_ready() -> None:
+        try:
+            for entry in messages:
+                username = entry["username"]
+                text = entry["message"]
+                try:
+                    member = discord.utils.find(
+                        lambda m: m.name == username or str(m) == username,
+                        client.get_all_members(),
+                    )
+
+                    if member is None:
+                        logger.error(
+                            "Discord user %r not found in any guild.", username
+                        )
+                        continue
+
+                    await member.send(text)
+                    logger.info("Sent Discord DM to %s.", username)
+                    results[username] = True
+                except Exception as exc:
+                    # One failed DM shouldn't stop the rest of the batch.
+                    logger.error("Failed to send Discord DM to %s: %s", username, exc)
+        finally:
+            await client.close()
+
+    await client.start(DISCORD_BOT_TOKEN)
+    return results

@@ -138,6 +138,43 @@ def fail_run(
     return False
 
 
+def has_already_notified(run_id: str, agent: str = "notification_agent") -> bool:
+    """Check whether this agent already logged success for a run.
+
+    Used by the notification agent to guarantee idempotency: if
+    notifications for this run_id were already sent successfully once
+    (e.g. this function is being called again because the triggering
+    event was redelivered), it should never send them a second time.
+
+    Args:
+        run_id: The run_id to check.
+        agent: The agent name to check for (defaults to
+            "notification_agent").
+
+    Returns:
+        bool: True if a "success" run log entry already exists for this
+            run_id/agent pair, False otherwise.
+
+    Raises:
+        RuntimeError: If the query fails.
+    """
+    try:
+        client = get_client()
+        query = (
+            client.collection(RUN_LOGS_COLLECTION)
+            .where("run_id", "==", run_id)
+            .where("agent", "==", agent)
+            .where("status", "==", "success")
+            .limit(1)
+        )
+        return len(list(query.stream())) > 0
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to check prior notifications for run_id={run_id!r}, "
+            f"agent={agent!r}: {exc}"
+        ) from exc
+
+
 def check_saturday_run(sunday_date: str) -> bool:
     """Check whether the assignment agent completed successfully.
 
