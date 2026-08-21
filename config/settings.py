@@ -47,6 +47,7 @@ OVERSEER_RIDE_EMAIL = os.getenv("OVERSEER_RIDE_EMAIL")
 OVERSEER_DRIVER_EMAIL = os.getenv("OVERSEER_DRIVER_EMAIL")
 BCC_EMAIL = os.getenv("BCC_EMAIL")
 RIDER_SHEET_ID = os.getenv("RIDER_SHEET_ID")
+GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
 # OVERSEER_EMAILS is stored as a comma-separated string in .env
 # (e.g. "alice@example.com,bob@example.com") and parsed into a list here.
@@ -72,6 +73,7 @@ _REQUIRED_SETTINGS = {
     "OVERSEER_RIDE_EMAIL": OVERSEER_RIDE_EMAIL,
     "OVERSEER_DRIVER_EMAIL": OVERSEER_DRIVER_EMAIL,
     "BCC_EMAIL": BCC_EMAIL,
+    "GMAIL_APP_PASSWORD": GMAIL_APP_PASSWORD,
     "RIDER_SHEET_ID": RIDER_SHEET_ID,
 }
 
