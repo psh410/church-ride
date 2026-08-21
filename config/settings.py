@@ -42,6 +42,7 @@ DEAD_MAN_HOUR = "10:00"
 ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
 ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
+SHEETS_ID = os.getenv("SHEETS_ID")
 
 # OVERSEER_EMAILS is stored as a comma-separated string in .env
 # (e.g. "alice@example.com,bob@example.com") and parsed into a list here.
@@ -51,6 +52,11 @@ OVERSEER_EMAILS = [
 ]
 
 DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+
+# The Google Sheets file ID that holds driver/route data (Available
+# Drivers, Form Responses, and Routes tabs). Driver data lives in Sheets,
+# not Firestore, since it's maintained by hand/via a Google Form.
+SHEETS_ID = os.getenv("SHEETS_ID")
 
 # --------------------------------------------------------------------------
 # Validation
@@ -63,6 +69,7 @@ _REQUIRED_SETTINGS = {
     "GOOGLE_CLOUD_PROJECT": GOOGLE_CLOUD_PROJECT,
     "ADMIN_EMAIL": ADMIN_EMAIL,
     "DISCORD_BOT_TOKEN": DISCORD_BOT_TOKEN,
+    "SHEETS_ID": SHEETS_ID,
 }
 
 
