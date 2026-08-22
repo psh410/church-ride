@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, time
 
 from config import settings
 from db.firestore_client import get_assignment
@@ -516,7 +516,8 @@ def _build_saturday_summary(
         header_label = shuttle_label.replace("Shuttle", "SHUTTLE", 1)
         lines.append(f"{header_label}: {_rider_count_text(shuttle_counts['total'])}")
 
-        for stop, count in shuttle_counts["stops"].items():
+        for stop in sorted(shuttle_counts["stops"], key=_stop_time_sort_key):
+            count = shuttle_counts["stops"][stop]
             lines.append(f"- {stop}: {_rider_count_text(count)} ({STOP_TIMES.get(stop, 'time TBD')})")
             for name in names_by_shuttle_stop.get(shuttle_id, {}).get(stop, []):
                 lines.append(f"    \u2022 {name}")
@@ -557,6 +558,23 @@ def _rider_count_text(count: int) -> str:
         str: e.g. "1 rider" or "0 riders"/"2 riders".
     """
     return f"{count} rider" if count == 1 else f"{count} riders"
+
+
+def _stop_time_sort_key(stop: str) -> time:
+    """Convert a stop's pickup time into a sortable value.
+
+    Args:
+        stop: The stop name to look up in STOP_TIMES, e.g. "FAR".
+
+    Returns:
+        time: The parsed pickup time, used as a sort key so stops
+            display in pickup-time order rather than alphabetically.
+            Stops missing from STOP_TIMES sort last.
+    """
+    pickup_time = STOP_TIMES.get(stop)
+    if pickup_time is None:
+        return time.max
+    return datetime.strptime(pickup_time, "%I:%M %p").time()
 
 
 def _to_sheet_date_format(iso_date: str) -> str:
