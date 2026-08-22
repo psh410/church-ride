@@ -50,22 +50,30 @@ _TIMESTAMP_FORMATS = (
 )
 
 
-def get_riders_for_sunday(sunday_date: str) -> list[dict]:
-    """Return riders who signed up for a given Sunday's shuttle service.
+def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -> list[dict]:
+    """Return riders who signed up for a given Sunday.
 
     Reads every row of the "Form Responses 1" tab and keeps only rows
     whose timestamp falls within this Sunday's signup window (the
     previous Sunday at 10:00 AM through the preceding Saturday at
-    6:00 PM) and whose campus stop maps to a real shuttle.
+    6:00 PM).
 
     Args:
         sunday_date: The Sunday date to fetch signups for, in ISO
             "YYYY-MM-DD" format, e.g. "2026-08-23".
+        include_non_shuttle: If False (default), only riders whose
+            campus stop maps to a real shuttle are returned (identical
+            to the original behavior). If True, every rider in the
+            signup window is returned - shuttle riders get their normal
+            "shuttle_id", while riders whose stop isn't a serviced stop
+            (e.g. "Other", or any free-text entry) get "shuttle_id": None
+            and "stop" set to whatever they typed in the Campus Address
+            field.
 
     Returns:
         list[dict]: One dict per valid signup, each with "name", "email"
-            (or None), "phone", "stop", "shuttle_id", "grade", and
-            "submitted_at" (ISO timestamp string).
+            (or None), "phone", "stop", "shuttle_id" (str or None),
+            "grade", and "submitted_at" (ISO timestamp string).
 
     Raises:
         RuntimeError: If sunday_date is invalid or the sheet can't be read.
@@ -111,7 +119,7 @@ def get_riders_for_sunday(sunday_date: str) -> list[dict]:
 
         stop = _cell(row, _STOP_COL)
         shuttle_id = STOP_TO_SHUTTLE.get(stop)
-        if shuttle_id is None:
+        if shuttle_id is None and not include_non_shuttle:
             # Not a serviced stop (e.g. "Other") - ignore this signup.
             continue
 
@@ -128,6 +136,44 @@ def get_riders_for_sunday(sunday_date: str) -> list[dict]:
         )
 
     return riders
+
+
+def get_all_riders_for_sunday(sunday_date: str) -> dict:
+    """Return every signup for a Sunday, split into shuttle/non-shuttle groups.
+
+    Args:
+        sunday_date: The Sunday date to fetch signups for, in ISO
+            "YYYY-MM-DD" format.
+
+    Returns:
+        dict: {
+            "shuttle_riders": list[dict] - riders with a real shuttle_id,
+            "non_shuttle_riders": list[dict] - riders with shuttle_id None,
+            "total": int,
+            "shuttle_total": int,
+            "non_shuttle_total": int,
+        }
+
+    Raises:
+        RuntimeError: If reading the rider signups fails.
+    """
+    try:
+        riders = get_riders_for_sunday(sunday_date, include_non_shuttle=True)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to get all riders for sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+    shuttle_riders = [rider for rider in riders if rider["shuttle_id"] is not None]
+    non_shuttle_riders = [rider for rider in riders if rider["shuttle_id"] is None]
+
+    return {
+        "shuttle_riders": shuttle_riders,
+        "non_shuttle_riders": non_shuttle_riders,
+        "total": len(riders),
+        "shuttle_total": len(shuttle_riders),
+        "non_shuttle_total": len(non_shuttle_riders),
+    }
 
 
 def get_rider_counts(sunday_date: str) -> dict:

@@ -11,10 +11,11 @@ from datetime import datetime
 from config import settings
 from db.firestore_client import get_assignment
 from functions.read_riders_sheet import (
+    MAX_RIDERS_PER_SHUTTLE,
+    STOP_TO_SHUTTLE,
+    get_all_riders_for_sunday,
     get_next_sunday_date,
     get_rider_counts,
-    get_riders_for_sunday,
-    is_shuttle_full,
 )
 from functions.read_sheets import get_all_drivers_with_history, get_routes
 from functions.send_email import send_email
@@ -38,6 +39,13 @@ STOP_TIMES = {
     "Allen": "9:00 AM",
     "ISR": "9:05 AM",
     "Icon": "9:10 AM",
+}
+
+# Return departure time from church for each shuttle, shown in the
+# Wednesday reminder email after that shuttle's pickup stops.
+RETURN_DEPARTURE_TIMES = {
+    "shuttle_1": "11:20 AM",
+    "shuttle_2": "11:40 AM",
 }
 
 # Link to the full rider signup sheet, included at the bottom of the
@@ -138,6 +146,9 @@ def send_saturday_update(sunday_date: str) -> dict:
 
     Called at noon, 6 PM, and 9 PM on Saturday. Purely a status report -
     no Claude drafting, since the content is simple and time-sensitive.
+    Reports both shuttle riders (with a per-stop breakdown and rider
+    names) and non-shuttle riders (who need a personal driver
+    coordinated separately, outside the shuttle system).
 
     Args:
         sunday_date: The Sunday date to report counts for, in ISO
@@ -147,31 +158,29 @@ def send_saturday_update(sunday_date: str) -> dict:
         dict: {"status": "sent" or "failed"}.
 
     Raises:
-        RuntimeError: If rider counts or the rider list can't be read.
+        RuntimeError: If the rider list can't be read.
     """
     try:
-        counts = get_rider_counts(sunday_date)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to read rider counts for sunday_date={sunday_date!r}: {exc}"
-        ) from exc
-
-    try:
-        riders = get_riders_for_sunday(sunday_date)
+        all_riders = get_all_riders_for_sunday(sunday_date)
     except Exception as exc:
         raise RuntimeError(
             f"Failed to read riders for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
-    full_shuttles = []
-    for shuttle_id in SHUTTLE_NAMES:
-        try:
-            if is_shuttle_full(shuttle_id, sunday_date):
-                full_shuttles.append(shuttle_id)
-        except Exception as exc:
-            logger.error("Failed to check capacity for %r: %s", shuttle_id, exc)
+    shuttle_riders = all_riders["shuttle_riders"]
+    non_shuttle_riders = all_riders["non_shuttle_riders"]
 
-    body = _build_saturday_summary(counts, riders, full_shuttles)
+    # Build the per-shuttle/per-stop breakdown locally from the rider
+    # list we already have, rather than making a second Sheets read via
+    # get_rider_counts()/is_shuttle_full().
+    counts = _build_shuttle_counts(shuttle_riders)
+    full_shuttles = [
+        shuttle_id
+        for shuttle_id, shuttle_counts in counts.items()
+        if shuttle_counts["total"] >= MAX_RIDERS_PER_SHUTTLE
+    ]
+
+    body = _build_saturday_summary(all_riders, counts, non_shuttle_riders, full_shuttles)
 
     try:
         sent = send_email(
@@ -299,6 +308,8 @@ def _build_wednesday_reminder_body(
         lines.append(f"{driver_name} \u2014 {shuttle_label}")
         for stop in stops:
             lines.append(f"- {stop.get('stop_name', 'Unknown stop')}: {stop.get('pickup_time', 'time TBD')}")
+        return_time = RETURN_DEPARTURE_TIMES.get(assignment.get("route_id"), "time TBD")
+        lines.append(f"Return departure from church: {return_time}")
         lines.append("")
 
     lines.append("Please arrive at your first stop a few minutes early.")
@@ -410,27 +421,77 @@ def _format_full_date(iso_date: str) -> str:
     return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
 
 
-def _build_saturday_summary(counts: dict, riders: list[dict], full_shuttles: list[str]) -> str:
-    """Format the plain-text Saturday rider-count summary email body.
+def _build_shuttle_counts(shuttle_riders: list[dict]) -> dict:
+    """Group shuttle riders into per-shuttle/per-stop counts.
 
-    Each stop's line shows its rider count, and - if any riders are
-    signed up there - a bulleted list of their names underneath.
+    Mirrors the shape returned by
+    functions.read_riders_sheet.get_rider_counts(), but is computed
+    locally from an already-fetched rider list instead of making a
+    second Sheets read.
 
     Args:
-        counts: The dict returned by get_rider_counts().
-        riders: The rider dicts returned by get_riders_for_sunday(),
-            each with "shuttle_id", "stop", and "name".
+        shuttle_riders: Riders with a real shuttle_id (the
+            "shuttle_riders" list from get_all_riders_for_sunday()).
+
+    Returns:
+        dict: One key per shuttle_id, each mapping to
+            {"total": int, "stops": {stop_name: int, ...}} (every stop
+            that shuttle serves is included, even with a count of 0).
+    """
+    stops_by_shuttle: dict[str, list[str]] = {}
+    for stop, shuttle_id in STOP_TO_SHUTTLE.items():
+        stops_by_shuttle.setdefault(shuttle_id, []).append(stop)
+
+    counts: dict = {
+        shuttle_id: {"total": 0, "stops": {stop: 0 for stop in stops}}
+        for shuttle_id, stops in stops_by_shuttle.items()
+    }
+
+    for rider in shuttle_riders:
+        shuttle_id = rider["shuttle_id"]
+        stop = rider["stop"]
+        counts[shuttle_id]["total"] += 1
+        counts[shuttle_id]["stops"][stop] = counts[shuttle_id]["stops"].get(stop, 0) + 1
+
+    return counts
+
+
+def _build_saturday_summary(
+    all_riders: dict, counts: dict, non_shuttle_riders: list[dict], full_shuttles: list[str]
+) -> str:
+    """Format the plain-text Saturday rider-count summary email body.
+
+    Leads with a total-requests header (shuttle vs. non-shuttle), then
+    the usual shuttle breakdown (counts and rider names per stop), then
+    - if there are any - a list of non-shuttle riders who still need a
+    personal driver coordinated.
+
+    Args:
+        all_riders: The dict returned by get_all_riders_for_sunday(),
+            used here for "total", "shuttle_total", and
+            "non_shuttle_total".
+        counts: The dict returned by _build_shuttle_counts().
+        non_shuttle_riders: Riders with shuttle_id None, each with
+            "name" and "stop" (their typed Campus Address).
         full_shuttles: shuttle_ids that have hit capacity.
 
     Returns:
         str: The formatted email body.
     """
+    # counts only holds numbers, so names are pulled separately from the
+    # underlying rider list and grouped the same way (by shuttle, then stop).
     names_by_shuttle_stop: dict[str, dict[str, list[str]]] = {}
-    for rider in riders:
+    for rider in all_riders["shuttle_riders"]:
         stops = names_by_shuttle_stop.setdefault(rider["shuttle_id"], {})
         stops.setdefault(rider["stop"], []).append(rider["name"])
 
-    lines = []
+    lines = [
+        f"Total ride requests this week: {all_riders['total']}",
+        f"- Shuttle stops: {all_riders['shuttle_total']}",
+        f"- Non-shuttle (need personal driver): {all_riders['non_shuttle_total']}",
+        "",
+    ]
+
     for shuttle_id, shuttle_label in SHUTTLE_NAMES.items():
         shuttle_counts = counts.get(shuttle_id, {"total": 0, "stops": {}})
         # Only the "Shuttle N" part is uppercased - the van description
@@ -447,8 +508,15 @@ def _build_saturday_summary(counts: dict, riders: list[dict], full_shuttles: lis
             lines.append(f"\u26a0\ufe0f SHUTTLE {shuttle_id[-1]} IS FULL (14/14)")
         lines.append("")
 
-    lines.append(f"TOTAL: {_rider_count_text(counts.get('grand_total', 0))}")
+    lines.append(f"TOTAL: {_rider_count_text(all_riders['shuttle_total'])}")
     lines.append("Deadline: Saturday 6 PM")
+
+    if non_shuttle_riders:
+        lines.append("")
+        lines.append("NON-SHUTTLE RIDERS (need personal driver coordination):")
+        for rider in non_shuttle_riders:
+            lines.append(f"  \u2022 {rider['name']} - {rider['stop']}")
+
     lines.append("")
     lines.append(f"To view all signups: {RIDER_SIGNUP_SHEET_URL}")
     lines.append("")
