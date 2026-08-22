@@ -8,12 +8,9 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
-import anthropic
-
 from config import settings
 from db.firestore_client import get_assignment
 from functions.read_riders_sheet import (
-    STOP_TO_SHUTTLE,
     get_next_sunday_date,
     get_rider_counts,
     get_riders_for_sunday,
@@ -24,11 +21,9 @@ from functions.send_email import send_email
 
 logger = logging.getLogger(__name__)
 
-CLAUDE_MODEL = "claude-sonnet-4-6"
-CLAUDE_MAX_TOKENS = 600
-
 CHURCH_ADDRESS = "2906 Crossing Ct, Champaign, IL"
 SERVICE_TIME = "9:30 AM"
+OVERSEER_DRIVER_CONTACT_NAME = "Dae Kang"
 
 # Friendly display name (including which van) for each shuttle.
 SHUTTLE_NAMES = {
@@ -52,31 +47,28 @@ RIDER_SIGNUP_SHEET_URL = (
     "1efQiqUoqAX5uNF22Aw8v6AkfGC3IjuSLBdcg23LldCw/edit?usp=sharing"
 )
 
-_WEDNESDAY_SYSTEM_PROMPT = (
-    "You are drafting a Wednesday reminder email for a church shuttle "
-    "driver at Covenant Fellowship Church. Write in a warm, friendly "
-    "church community tone. Be concise but include all important "
-    "details. Sign off as 'CFC Ride Coordination Team'"
-)
-
 
 def send_wednesday_reminder(sunday_date: str) -> dict:
-    """Send each assigned driver a Wednesday reminder about their run.
+    """Send one combined reminder email to all of this Sunday's drivers.
 
-    Reads this Sunday's assignments and rider counts, looks up each
-    driver's email, and uses Claude to draft a warm reminder covering
-    their shuttle, stops/times, and expected rider counts per stop.
+    Unlike a per-driver reminder, this sends a single email addressed to
+    every assigned driver at once, listing each driver's shuttle/van and
+    every stop it serves (with pickup times, regardless of rider count)
+    plus standard van pickup/return instructions. No rider names or
+    counts are included, and no Claude drafting is used - the body is
+    built directly from static text and Sheets data.
 
     Args:
-        sunday_date: The Sunday date to send reminders for, in ISO
+        sunday_date: The Sunday date to send the reminder for, in ISO
             "YYYY-MM-DD" format.
 
     Returns:
-        dict: {"sent_count": int, "failures": list[dict]}.
+        dict: {"sent_count": int, "failures": list[dict]}. sent_count is
+            1 if the combined email was sent successfully, 0 otherwise.
 
     Raises:
-        RuntimeError: If assignments, rider counts, or driver data can't
-            be read.
+        RuntimeError: If assignments, routes, or driver data can't be
+            read.
     """
     try:
         assignments = get_assignment(sunday_date)
@@ -88,13 +80,6 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
     if not assignments:
         logger.info("No assignments found for sunday_date=%r; nothing to remind.", sunday_date)
         return {"sent_count": 0, "failures": []}
-
-    try:
-        rider_counts = get_rider_counts(sunday_date)
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to read rider counts for sunday_date={sunday_date!r}: {exc}"
-        ) from exc
 
     try:
         routes = get_routes()
@@ -113,50 +98,39 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
             f"Failed to read driver details for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
-    client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
-
-    sent_count = 0
+    driver_emails = []
     failures: list[dict] = []
 
     for assignment in assignments:
         driver_name = assignment.get("driver_name") or assignment.get("driver_id")
-        route_id = assignment.get("route_id")
+        driver = drivers_by_name.get(driver_name)
+        if driver is None or not driver.get("email"):
+            logger.error("No email on file for driver %r; excluding from reminder.", driver_name)
+            failures.append({"driver_name": driver_name, "error": "No email on file."})
+            continue
+        driver_emails.append(driver["email"])
 
-        try:
-            driver = drivers_by_name.get(driver_name)
-            if driver is None or not driver.get("email"):
-                raise RuntimeError(f"No email on file for driver {driver_name!r}.")
+    if not driver_emails:
+        return {"sent_count": 0, "failures": failures}
 
-            stop_breakdown = _build_stop_breakdown(route_id, routes, rider_counts)
-            shuttle_label = SHUTTLE_NAMES.get(route_id, assignment.get("route_name", route_id))
-            shuttle_total = rider_counts.get(route_id, {}).get("total", 0)
+    body = _build_wednesday_reminder_body(sunday_date, assignments, routes)
 
-            body = _draft_wednesday_reminder(
-                client,
-                driver_name=driver_name,
-                shuttle_label=shuttle_label,
-                shuttle_total=shuttle_total,
-                stop_breakdown=stop_breakdown,
-            )
+    try:
+        sent = send_email(
+            to=", ".join(driver_emails),
+            subject=f"CFC Sunday Shuttle Reminder - {_format_short_date(sunday_date)}",
+            body=body,
+            cc=settings.OVERSEER_DRIVER_EMAIL,
+            bcc=settings.BCC_EMAIL,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to send Wednesday reminder email: {exc}") from exc
 
-            sent = send_email(
-                to=driver["email"],
-                subject=f"CFC Shuttle Reminder - Sunday {sunday_date}",
-                body=body,
-                cc=settings.OVERSEER_DRIVER_EMAIL,
-                bcc=settings.BCC_EMAIL,
-            )
+    if not sent:
+        failures.append({"driver_name": "all", "error": "send_email returned False."})
+        return {"sent_count": 0, "failures": failures}
 
-            if sent:
-                sent_count += 1
-            else:
-                failures.append({"driver_name": driver_name, "error": "send_email returned False."})
-
-        except Exception as exc:
-            logger.error("Failed to send Wednesday reminder to %r: %s", driver_name, exc)
-            failures.append({"driver_name": driver_name, "error": str(exc)})
-
-    return {"sent_count": sent_count, "failures": failures}
+    return {"sent_count": 1, "failures": failures}
 
 
 def send_saturday_update(sunday_date: str) -> dict:
@@ -280,32 +254,160 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
-def _build_stop_breakdown(route_id: str, routes: list[dict], rider_counts: dict) -> str:
-    """Build a "stop: pickup_time - N riders" text block for one shuttle.
+def _build_wednesday_reminder_body(
+    sunday_date: str, assignments: list[dict], routes: list[dict]
+) -> str:
+    """Build the combined Wednesday reminder email body for all drivers.
 
     Args:
-        route_id: The shuttle_id to build the breakdown for.
-        routes: Route dicts from functions.read_sheets.get_routes().
-        rider_counts: The dict returned by get_rider_counts().
+        sunday_date: The Sunday date this reminder is for, in ISO
+            "YYYY-MM-DD" format.
+        assignments: This Sunday's assignment dicts (each with
+            "driver_name"/"driver_id" and "route_id").
+        routes: Route dicts from functions.read_sheets.get_routes(),
+            used to look up each shuttle's name, van, and full stop list.
 
     Returns:
-        str: One line per stop, e.g. "FAR (9:05 AM): 4 riders".
+        str: The complete plain-text email body.
     """
-    stop_names = [stop for stop, shuttle in STOP_TO_SHUTTLE.items() if shuttle == route_id]
+    driver_names = [assignment.get("driver_name") or assignment.get("driver_id") for assignment in assignments]
+    first_names = [name.split(" ")[0] for name in driver_names]
 
-    # Prefer the authoritative stop order from the Routes sheet when
-    # available; fall back to the hardcoded mapping otherwise.
-    for route in routes:
-        if route.get("shuttle_id") == route_id and route.get("stops"):
-            stop_names = [stop["stop_name"] for stop in route["stops"]]
-            break
+    scheduled_word = _scheduled_word(len(driver_names))
+    scheduled_phrase = f"you are {scheduled_word} scheduled" if scheduled_word else "you are scheduled"
 
-    stop_counts = rider_counts.get(route_id, {}).get("stops", {})
     lines = [
-        f"- {stop} ({STOP_TIMES.get(stop, 'time TBD')}): {stop_counts.get(stop, 0)} riders"
-        for stop in stop_names
+        f"Hi {_join_names(first_names)},",
+        "",
+        f"This is a reminder that {scheduled_phrase} to drive this Sunday, "
+        f"{_format_full_date(sunday_date)} at Covenant Fellowship Church.",
+        "",
+        "YOUR ASSIGNMENTS:",
+        "",
     ]
+
+    for assignment, driver_name in zip(assignments, driver_names):
+        route = _find_route(routes, assignment.get("route_id"))
+
+        if route:
+            shuttle_label = f"{route.get('shuttle_name', assignment.get('route_id'))} \u2014 {route.get('van', 'van TBD')}"
+            stops = route.get("stops", [])
+        else:
+            shuttle_label = assignment.get("route_name", assignment.get("route_id"))
+            stops = []
+
+        lines.append(f"{driver_name} \u2014 {shuttle_label}")
+        for stop in stops:
+            lines.append(f"- {stop.get('stop_name', 'Unknown stop')}: {stop.get('pickup_time', 'time TBD')}")
+        lines.append("")
+
+    lines.append("Please arrive at your first stop a few minutes early.")
+    lines.append(f"Service starts at {SERVICE_TIME}.")
+    lines.append(f"Church address: {CHURCH_ADDRESS}")
+    lines.append("")
+    lines.append("---")
+    lines.append("CHURCH VAN INSTRUCTIONS")
+    lines.append("")
+    lines.append("1. Pickup & Key Access")
+    lines.append("   - Van location: Parked in the church parking lot")
+    lines.append(
+        "   - Key lockbox: Located on the wall in the old kitchen "
+        "(next to the conference room)"
+    )
+    lines.append("   - Unlock code: 2906E")
+    lines.append("")
+    lines.append("2. Return & Drop-Off")
+    lines.append("   - Park the van back in the church parking lot")
+    lines.append("   - Return the key to the wall lockbox in the old kitchen")
+    lines.append("   - Close the box and press E to lock it")
+    lines.append("   - Record the number of riders")
+    lines.append("")
+    lines.append(f"Questions? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
+    lines.append("")
+    lines.append("See you Sunday!")
+    lines.append("CFC Ride Coordination Team")
+    lines.append("")
+    lines.append("---")
+    lines.append("This is an automated reminder sent by the CFC Ride Coordination Agent.")
+
     return "\n".join(lines)
+
+
+def _join_names(names: list[str]) -> str:
+    """Join a list of names into a natural English list.
+
+    Args:
+        names: The names to join, e.g. ["Josiah", "Ryan"].
+
+    Returns:
+        str: "Josiah" for one name, "Josiah and Ryan" for two, or
+            "Josiah, Ryan, and Peter" for three or more.
+    """
+    if len(names) == 1:
+        return names[0]
+    if len(names) == 2:
+        return f"{names[0]} and {names[1]}"
+    return f"{', '.join(names[:-1])}, and {names[-1]}"
+
+
+def _scheduled_word(driver_count: int) -> str:
+    """Pick the word describing how many drivers are scheduled.
+
+    Args:
+        driver_count: Number of drivers in this reminder.
+
+    Returns:
+        str: "both" for exactly two drivers, "all" for three or more,
+            or "" for a single driver (the caller drops the word
+            entirely in that case).
+    """
+    if driver_count == 2:
+        return "both"
+    if driver_count > 2:
+        return "all"
+    return ""
+
+
+def _find_route(routes: list[dict], shuttle_id: str) -> dict | None:
+    """Find a route dict by shuttle_id.
+
+    Args:
+        routes: Route dicts from functions.read_sheets.get_routes().
+        shuttle_id: The shuttle_id to look up.
+
+    Returns:
+        dict or None: The matching route, or None if not found.
+    """
+    for route in routes:
+        if route.get("shuttle_id") == shuttle_id:
+            return route
+    return None
+
+
+def _format_short_date(iso_date: str) -> str:
+    """Format an ISO date as a short display date, e.g. "Aug 23".
+
+    Args:
+        iso_date: A date string in "YYYY-MM-DD" format.
+
+    Returns:
+        str: The date formatted as "Mon D" (no zero-padded day).
+    """
+    parsed = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{parsed.strftime('%b')} {parsed.day}"
+
+
+def _format_full_date(iso_date: str) -> str:
+    """Format an ISO date as a full display date, e.g. "August 23, 2026".
+
+    Args:
+        iso_date: A date string in "YYYY-MM-DD" format.
+
+    Returns:
+        str: The date formatted as "Month D, YYYY" (no zero-padded day).
+    """
+    parsed = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{parsed.strftime('%B')} {parsed.day}, {parsed.year}"
 
 
 def _build_saturday_summary(counts: dict, riders: list[dict], full_shuttles: list[str]) -> str:
@@ -370,55 +472,6 @@ def _rider_count_text(count: int) -> str:
         str: e.g. "1 rider" or "0 riders"/"2 riders".
     """
     return f"{count} rider" if count == 1 else f"{count} riders"
-
-
-def _draft_wednesday_reminder(
-    client: anthropic.Anthropic,
-    driver_name: str,
-    shuttle_label: str,
-    shuttle_total: int,
-    stop_breakdown: str,
-) -> str:
-    """Use Claude to draft a warm Wednesday reminder email for one driver.
-
-    Args:
-        client: A shared anthropic.Anthropic client.
-        driver_name: The driver's name.
-        shuttle_label: The shuttle's friendly name (with van).
-        shuttle_total: Total riders expected on that shuttle.
-        stop_breakdown: Pre-formatted "stop (time): N riders" lines.
-
-    Returns:
-        str: The drafted email body.
-
-    Raises:
-        RuntimeError: If the Claude API call fails.
-    """
-    user_prompt = f"""Write a Wednesday reminder email for this driver:
-
-- Driver's name: {driver_name}
-- Shuttle: {shuttle_label}
-- Stops and pickup times, with expected riders per stop:
-{stop_breakdown}
-- Total riders expected: {shuttle_total}
-- Church address: {CHURCH_ADDRESS}
-- Service time: {SERVICE_TIME}
-- Contact for questions: {settings.OVERSEER_DRIVER_EMAIL}
-
-Include all of the above details clearly."""
-
-    try:
-        response = client.messages.create(
-            model=CLAUDE_MODEL,
-            max_tokens=CLAUDE_MAX_TOKENS,
-            system=_WEDNESDAY_SYSTEM_PROMPT,
-            messages=[{"role": "user", "content": user_prompt}],
-        )
-        return response.content[0].text.strip()
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to draft Wednesday reminder for driver {driver_name!r}: {exc}"
-        ) from exc
 
 
 def _to_sheet_date_format(iso_date: str) -> str:
