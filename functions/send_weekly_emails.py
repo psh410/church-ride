@@ -26,6 +26,10 @@ CHURCH_ADDRESS = "2906 Crossing Ct, Champaign, IL"
 SERVICE_TIME = "9:30 AM"
 OVERSEER_DRIVER_CONTACT_NAME = "Dae Kang"
 
+# Visual divider used around each driver's assignment block in the
+# Wednesday reminder email.
+_SECTION_DIVIDER = "=" * 40
+
 # Friendly display name (including which van) for each shuttle.
 SHUTTLE_NAMES = {
     "shuttle_1": "Shuttle 1 (Ford Transit - Gray)",
@@ -291,25 +295,38 @@ def _build_wednesday_reminder_body(
         f"This is a reminder that {scheduled_phrase} to drive this Sunday, "
         f"{_format_full_date(sunday_date)} at Covenant Fellowship Church.",
         "",
-        "YOUR ASSIGNMENTS:",
-        "",
     ]
 
     for assignment, driver_name in zip(assignments, driver_names):
         route = _find_route(routes, assignment.get("route_id"))
 
         if route:
-            shuttle_label = f"{route.get('shuttle_name', assignment.get('route_id'))} \u2014 {route.get('van', 'van TBD')}"
+            shuttle_name = route.get("shuttle_name", assignment.get("route_id"))
+            van = route.get("van", "van TBD")
             stops = route.get("stops", [])
         else:
-            shuttle_label = assignment.get("route_name", assignment.get("route_id"))
+            shuttle_name = assignment.get("route_name", assignment.get("route_id"))
+            van = "van TBD"
             stops = []
 
-        lines.append(f"{driver_name} \u2014 {shuttle_label}")
-        for stop in stops:
-            lines.append(f"- {stop.get('stop_name', 'Unknown stop')}: {stop.get('pickup_time', 'time TBD')}")
+        # Only the "Shuttle N" part is uppercased - the van description
+        # stays in its normal casing, e.g. "SHUTTLE 1 — Ford Transit (Gray)".
+        shuttle_header = f"{shuttle_name.replace('Shuttle', 'SHUTTLE', 1)} \u2014 {van}"
         return_time = RETURN_DEPARTURE_TIMES.get(assignment.get("route_id"), "time TBD")
-        lines.append(f"Return departure from church: {return_time}")
+
+        lines.append(_SECTION_DIVIDER)
+        lines.append(shuttle_header)
+        lines.append(f"Driver: {driver_name}")
+        lines.append(_SECTION_DIVIDER)
+        lines.append("Pickup Stops:")
+        for stop in stops:
+            lines.append(
+                f"  \U0001f4cd {stop.get('stop_name', 'Unknown stop')}: "
+                f"{stop.get('pickup_time', 'time TBD')}"
+            )
+        lines.append("")
+        lines.append(f"\U0001f504 Return departure from church: {return_time}")
+        lines.append(_SECTION_DIVIDER)
         lines.append("")
 
     lines.append("Please arrive at your first stop a few minutes early.")
