@@ -28,6 +28,14 @@ AVAILABLE_DRIVERS_TAB = "Available Drivers"
 FORM_RESPONSES_TAB = "Form Responses 1"
 ROUTES_TAB = "Routes"
 
+# Reference departure time for each shuttle, used to pick a sane value
+# when the Routes tab has inconsistent departure_time entries across a
+# shuttle's stop-rows (see _resolve_departure_time()).
+_DEPARTURE_TIME_REFERENCE = {
+    "shuttle_1": "11:30 AM",
+    "shuttle_2": "11:50 AM",
+}
+
 # --------------------------------------------------------------------------
 # Client initialization
 # --------------------------------------------------------------------------
@@ -206,12 +214,17 @@ def get_routes() -> list[dict]:
     """Return all routes (shuttles) and their stops from the Routes tab.
 
     Row 1 is headers (shuttle_id, shuttle_name, van, stop_name,
-    pickup_time); data starts on row 2. Rows sharing the same shuttle_id
-    are grouped into a single route dict.
+    pickup_time, departure_time); data starts on row 2. Rows sharing the
+    same shuttle_id are grouped into a single route dict.
+    departure_time is a per-shuttle value, not per-stop, but the sheet
+    repeats it on every one of that shuttle's rows - see
+    _resolve_departure_time() for how a single value is picked if those
+    repeated entries don't all agree.
 
     Returns:
         list[dict]: One dict per shuttle_id, in the order first seen:
             {"shuttle_id": str, "shuttle_name": str, "van": str,
+            "departure_time": str,
             "stops": [{"stop_name": str, "pickup_time": str}, ...]}.
 
     Raises:
@@ -238,8 +251,11 @@ def get_routes() -> list[dict]:
     van_idx = _find_column_index(header, "van")
     stop_name_idx = _find_column_index(header, "stop_name")
     pickup_time_idx = _find_column_index(header, "pickup_time")
+    departure_time_idx = _find_column_index(header, "departure_time")
 
     routes_by_id: dict[str, dict] = {}
+    departure_times_by_shuttle: dict[str, list[str]] = {}
+
     for row in rows[1:]:  # data starts row 2
         shuttle_id = _cell(row, shuttle_id_idx)
         if not shuttle_id:
@@ -250,6 +266,7 @@ def get_routes() -> list[dict]:
                 "shuttle_id": shuttle_id,
                 "shuttle_name": _cell(row, shuttle_name_idx),
                 "van": _cell(row, van_idx),
+                "departure_time": "",  # filled in below once all rows are seen
                 "stops": [],
             }
 
@@ -262,9 +279,99 @@ def get_routes() -> list[dict]:
                 }
             )
 
+        departure_time = _cell(row, departure_time_idx)
+        if departure_time:
+            departure_times_by_shuttle.setdefault(shuttle_id, []).append(departure_time)
+
+    for shuttle_id, route in routes_by_id.items():
+        route["departure_time"] = _resolve_departure_time(
+            shuttle_id, departure_times_by_shuttle.get(shuttle_id, [])
+        )
+
     # Dicts preserve insertion order in Python 3.7+, so this naturally
     # returns routes in the order their shuttle_id first appeared.
     return list(routes_by_id.values())
+
+
+def _resolve_departure_time(shuttle_id: str, values: list[str]) -> str:
+    """Pick one departure_time value for a shuttle from its raw sheet rows.
+
+    departure_time applies to the whole shuttle, but the Routes tab
+    repeats it on every stop-row for that shuttle_id, so sheet editors
+    can accidentally enter different values for the same shuttle. This
+    resolves that to a single value:
+    - If every collected value is identical, that value is used as-is.
+    - If they differ, the value closest to that shuttle's reference
+      time (_DEPARTURE_TIME_REFERENCE) is used - "closest" meaning the
+      smallest absolute difference in minutes since midnight - and a
+      warning is logged so the inconsistency can be fixed in the sheet.
+
+    Args:
+        shuttle_id: The shuttle these departure_time values belong to.
+        values: Every non-empty departure_time cell value collected
+            across that shuttle's rows, in row order. May be empty if
+            the column was blank for every row.
+
+    Returns:
+        str: The resolved departure_time, or "" if values is empty.
+    """
+    if not values:
+        return ""
+
+    unique_values = set(values)
+    if len(unique_values) == 1:
+        return values[0]
+
+    logger.warning(
+        "Routes tab has inconsistent departure_time values for "
+        "shuttle_id=%r: %s. Using the value closest to the reference "
+        "time instead - please fix the sheet.",
+        shuttle_id,
+        sorted(unique_values),
+    )
+
+    reference = _DEPARTURE_TIME_REFERENCE.get(shuttle_id)
+    if reference is None:
+        # No reference time defined for this shuttle - fall back to the
+        # first value seen rather than guessing which one is "right".
+        return values[0]
+
+    try:
+        reference_minutes = _time_to_minutes(reference)
+    except ValueError:
+        return values[0]
+
+    parsed_values: list[tuple[str, int]] = []
+    for value in values:
+        try:
+            parsed_values.append((value, _time_to_minutes(value)))
+        except ValueError:
+            logger.warning(
+                "Skipping unparseable departure_time value %r for shuttle_id=%r.",
+                value,
+                shuttle_id,
+            )
+
+    if not parsed_values:
+        return values[0]
+
+    return min(parsed_values, key=lambda pair: abs(pair[1] - reference_minutes))[0]
+
+
+def _time_to_minutes(time_str: str) -> int:
+    """Convert a "H:MM AM/PM" time string into minutes since midnight.
+
+    Args:
+        time_str: A time string like "11:30 AM".
+
+    Returns:
+        int: Minutes since midnight (0-1439).
+
+    Raises:
+        ValueError: If time_str isn't in "H:MM AM/PM" format.
+    """
+    parsed = datetime.strptime(time_str.strip(), "%I:%M %p")
+    return parsed.hour * 60 + parsed.minute
 
 
 # --------------------------------------------------------------------------

@@ -12,7 +12,7 @@ import logging
 from datetime import date, datetime, time, timedelta
 
 from config import settings
-from functions.read_sheets import get_sheet_client
+from functions.read_sheets import get_routes, get_sheet_client
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +28,6 @@ _STOP_COL = 3
 _PHONE_COL = 4
 _EMAIL_COL = 5
 
-# Which shuttle serves each campus stop. Any stop not listed here
-# (including "Other") is not served by a shuttle and is ignored.
-STOP_TO_SHUTTLE = {
-    "Allen": "shuttle_2",
-    "FAR": "shuttle_1",
-    "Icon": "shuttle_2",
-    "ISR": "shuttle_2",
-    "SDRP": "shuttle_1",
-}
-
 # Each shuttle can seat 14 riders plus the driver (15 total).
 MAX_RIDERS_PER_SHUTTLE = 14
 
@@ -49,14 +39,103 @@ _TIMESTAMP_FORMATS = (
     "%m/%d/%Y",
 )
 
+# Cached route data (from functions.read_sheets.get_routes()) and the
+# lookups derived from it. Populated lazily on first use so this module
+# only reads the "Routes" tab once per process, no matter how many times
+# get_stop_to_shuttle_map()/get_stop_times_map() are called.
+_routes_cache: list[dict] | None = None
+_stop_to_shuttle_cache: dict[str, str] | None = None
+_stop_times_cache: dict[str, str] | None = None
+
+
+def _get_cached_routes() -> list[dict]:
+    """Return get_routes()'s result, fetching it at most once per process.
+
+    Returns:
+        list[dict]: The route dicts from
+            functions.read_sheets.get_routes().
+
+    Raises:
+        RuntimeError: If the "Routes" tab can't be read.
+    """
+    global _routes_cache
+
+    if _routes_cache is None:
+        try:
+            _routes_cache = get_routes()
+        except Exception as exc:
+            raise RuntimeError(f"Failed to read routes: {exc}") from exc
+
+    return _routes_cache
+
+
+def get_stop_to_shuttle_map() -> dict:
+    """Return a mapping of stop_name -> shuttle_id, read live from Sheets.
+
+    Replaces the old hardcoded STOP_TO_SHUTTLE dict - which shuttle
+    serves which stop can change over time, so this is always built from
+    the current "Routes" tab rather than baked into the code. Cached
+    after the first call so repeated lookups within a session don't
+    re-read the sheet.
+
+    Returns:
+        dict: {stop_name: shuttle_id, ...} for every stop across all
+            shuttles.
+
+    Raises:
+        RuntimeError: If the "Routes" tab can't be read.
+    """
+    global _stop_to_shuttle_cache
+
+    if _stop_to_shuttle_cache is None:
+        stop_to_shuttle: dict[str, str] = {}
+        for route in _get_cached_routes():
+            shuttle_id = route.get("shuttle_id")
+            for stop in route.get("stops", []):
+                stop_name = stop.get("stop_name")
+                if stop_name:
+                    stop_to_shuttle[stop_name] = shuttle_id
+        _stop_to_shuttle_cache = stop_to_shuttle
+
+    return _stop_to_shuttle_cache
+
+
+def get_stop_times_map() -> dict:
+    """Return a mapping of stop_name -> pickup_time, read live from Sheets.
+
+    Replaces the old hardcoded STOP_TIMES dict - pickup times are always
+    read from the current "Routes" tab rather than baked into the code.
+    Cached after the first call so repeated lookups within a session
+    don't re-read the sheet.
+
+    Returns:
+        dict: {stop_name: pickup_time, ...} for every stop across all
+            shuttles.
+
+    Raises:
+        RuntimeError: If the "Routes" tab can't be read.
+    """
+    global _stop_times_cache
+
+    if _stop_times_cache is None:
+        stop_times: dict[str, str] = {}
+        for route in _get_cached_routes():
+            for stop in route.get("stops", []):
+                stop_name = stop.get("stop_name")
+                if stop_name:
+                    stop_times[stop_name] = stop.get("pickup_time")
+        _stop_times_cache = stop_times
+
+    return _stop_times_cache
+
 
 def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -> list[dict]:
     """Return riders who signed up for a given Sunday.
 
     Reads every row of the "Form Responses 1" tab and keeps only rows
     whose timestamp falls within this Sunday's signup window (the
-    previous Sunday at 10:00 AM through the preceding Saturday at
-    6:00 PM).
+    previous Sunday at 10:00 AM through sunday_date itself at
+    9:00 AM).
 
     Args:
         sunday_date: The Sunday date to fetch signups for, in ISO
@@ -118,7 +197,7 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
             continue
 
         stop = _cell(row, _STOP_COL)
-        shuttle_id = STOP_TO_SHUTTLE.get(stop)
+        shuttle_id = get_stop_to_shuttle_map().get(stop)
         if shuttle_id is None and not include_non_shuttle:
             # Not a serviced stop (e.g. "Other") - ignore this signup.
             continue
@@ -203,7 +282,7 @@ def get_rider_counts(sunday_date: str) -> dict:
     # result always has a consistent shape, even for stops with no
     # signups yet.
     stops_by_shuttle: dict[str, list[str]] = {}
-    for stop, shuttle_id in STOP_TO_SHUTTLE.items():
+    for stop, shuttle_id in get_stop_to_shuttle_map().items():
         stops_by_shuttle.setdefault(shuttle_id, []).append(stop)
 
     counts: dict = {
@@ -248,7 +327,7 @@ def is_shuttle_full(shuttle_id: str, sunday_date: str) -> bool:
     if shuttle_counts is None:
         raise RuntimeError(
             f"Unknown shuttle_id={shuttle_id!r}; expected one of "
-            f"{sorted(set(STOP_TO_SHUTTLE.values()))}."
+            f"{sorted(set(get_stop_to_shuttle_map().values()))}."
         )
 
     return shuttle_counts["total"] >= MAX_RIDERS_PER_SHUTTLE
@@ -280,8 +359,8 @@ def get_next_sunday_date() -> str:
 def _get_signup_window(sunday_date: str) -> tuple[datetime, datetime]:
     """Compute the valid rider signup window for a given Sunday.
 
-    The window runs from the previous Sunday at 10:00 AM through the
-    Saturday immediately before sunday_date at 6:00 PM.
+    The window runs from the previous Sunday at 10:00 AM through
+    sunday_date itself at 9:00 AM.
 
     Args:
         sunday_date: The Sunday date to compute the window for, in ISO
@@ -295,10 +374,9 @@ def _get_signup_window(sunday_date: str) -> tuple[datetime, datetime]:
     """
     target_date = datetime.strptime(sunday_date, "%Y-%m-%d").date()
     previous_sunday = target_date - timedelta(days=7)
-    saturday_before = target_date - timedelta(days=1)
 
     window_start = datetime.combine(previous_sunday, time(10, 0))
-    window_end = datetime.combine(saturday_before, time(18, 0))
+    window_end = datetime.combine(target_date, time(9, 0))
 
     return window_start, window_end
 

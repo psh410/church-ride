@@ -12,10 +12,11 @@ from config import settings
 from db.firestore_client import get_assignment
 from functions.read_riders_sheet import (
     MAX_RIDERS_PER_SHUTTLE,
-    STOP_TO_SHUTTLE,
     get_all_riders_for_sunday,
     get_next_sunday_date,
     get_rider_counts,
+    get_stop_times_map,
+    get_stop_to_shuttle_map,
 )
 from functions.read_sheets import get_all_drivers_with_history, get_routes
 from functions.send_email import send_email
@@ -25,32 +26,18 @@ logger = logging.getLogger(__name__)
 CHURCH_ADDRESS = "2906 Crossing Ct, Champaign, IL"
 SERVICE_TIME = "9:30 AM"
 OVERSEER_DRIVER_CONTACT_NAME = "Dae Kang"
+OVERSEER_RIDE_CONTACT_NAME = "Sarah Choi"
 
 # Visual divider used around each driver's assignment block in the
 # Wednesday reminder email.
 _SECTION_DIVIDER = "=" * 40
 
-# Friendly display name (including which van) for each shuttle.
-SHUTTLE_NAMES = {
-    "shuttle_1": "Shuttle 1 (Ford Transit - Gray)",
-    "shuttle_2": "Shuttle 2 (GMC Savanna - Silver)",
-}
-
-# Pickup time for each campus stop, regardless of shuttle.
-STOP_TIMES = {
-    "FAR": "9:05 AM",
-    "SDRP": "9:10 AM",
-    "Allen": "9:00 AM",
-    "ISR": "9:05 AM",
-    "Icon": "9:10 AM",
-}
-
-# Return departure time from church for each shuttle, shown in the
-# Wednesday reminder email after that shuttle's pickup stops.
-RETURN_DEPARTURE_TIMES = {
-    "shuttle_1": "11:20 AM",
-    "shuttle_2": "11:40 AM",
-}
+# Shuttle names, vans, stop names, pickup times, and return departure
+# times are NOT hardcoded here - they're all read live from the
+# "Routes" tab via get_routes() (each route's own "departure_time"
+# field) and functions.read_riders_sheet.get_stop_times_map()/
+# get_stop_to_shuttle_map() inside each function below, so route changes
+# in Sheets are picked up automatically without a code change.
 
 # Link to the full rider signup sheet, included at the bottom of the
 # Saturday status update email.
@@ -171,6 +158,16 @@ def send_saturday_update(sunday_date: str) -> dict:
             f"Failed to read riders for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
+    try:
+        routes = get_routes()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read routes: {exc}") from exc
+
+    try:
+        stop_times_map = get_stop_times_map()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read stop pickup times: {exc}") from exc
+
     shuttle_riders = all_riders["shuttle_riders"]
     non_shuttle_riders = all_riders["non_shuttle_riders"]
 
@@ -178,20 +175,22 @@ def send_saturday_update(sunday_date: str) -> dict:
     # list we already have, rather than making a second Sheets read via
     # get_rider_counts()/is_shuttle_full().
     counts = _build_shuttle_counts(shuttle_riders)
-    full_shuttles = [
+    over_capacity_shuttles = [
         shuttle_id
         for shuttle_id, shuttle_counts in counts.items()
-        if shuttle_counts["total"] >= MAX_RIDERS_PER_SHUTTLE
+        if shuttle_counts["total"] > MAX_RIDERS_PER_SHUTTLE
     ]
 
-    body = _build_saturday_summary(all_riders, counts, non_shuttle_riders, full_shuttles)
+    body = _build_saturday_summary(
+        all_riders, counts, non_shuttle_riders, over_capacity_shuttles, routes, stop_times_map
+    )
 
     try:
         sent = send_email(
             to=settings.OVERSEER_DRIVER_EMAIL,
             subject=f"CFC Shuttle Update - Sunday {sunday_date}",
             body=body,
-            cc=settings.OVERSEER_RIDE_EMAIL,
+            cc=f"{settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
@@ -202,6 +201,106 @@ def send_saturday_update(sunday_date: str) -> dict:
         return {"status": "failed"}
 
     return {"status": "sent"}
+
+
+def send_saturday_driver_assignment(sunday_date: str) -> dict:
+    """Send drivers their current, confirmed rider list at 9:30 PM Saturday.
+
+    Unlike send_wednesday_reminder() (sent days before Sunday), this
+    goes out once most signups are in and lists every confirmed shuttle
+    rider under their stop, so drivers know who to expect Sunday
+    morning. Late additions after this email are still possible, in
+    which case an updated list is sent. No Claude drafting is used -
+    the body is built directly from static text plus Sheets/Firestore
+    data.
+
+    Args:
+        sunday_date: The Sunday date to send the final rider list for,
+            in ISO "YYYY-MM-DD" format.
+
+    Returns:
+        dict: {"sent_count": int, "failures": list[dict]}. sent_count is
+            1 if the combined email was sent successfully, 0 otherwise.
+
+    Raises:
+        RuntimeError: If riders, assignments, or driver data can't be
+            read.
+    """
+    try:
+        all_riders = get_all_riders_for_sunday(sunday_date)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read riders for sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+    try:
+        assignments = get_assignment(sunday_date)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read assignments for sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+    if not assignments:
+        logger.info("No assignments found for sunday_date=%r; nothing to send.", sunday_date)
+        return {"sent_count": 0, "failures": []}
+
+    try:
+        routes = get_routes()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read routes: {exc}") from exc
+
+    try:
+        stop_times_map = get_stop_times_map()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read stop pickup times: {exc}") from exc
+
+    # Drivers only exist in Sheets with a name (no stable ID), so we look
+    # each assignment's driver up by name to get their email address.
+    try:
+        drivers_by_name = {
+            driver["name"]: driver
+            for driver in get_all_drivers_with_history(_to_sheet_date_format(sunday_date))
+        }
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read driver details for sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+    driver_emails = []
+    failures: list[dict] = []
+
+    for assignment in assignments:
+        driver_name = assignment.get("driver_name") or assignment.get("driver_id")
+        driver = drivers_by_name.get(driver_name)
+        if driver is None or not driver.get("email"):
+            logger.error("No email on file for driver %r; excluding from final list.", driver_name)
+            failures.append({"driver_name": driver_name, "error": "No email on file."})
+            continue
+        driver_emails.append(driver["email"])
+
+    if not driver_emails:
+        return {"sent_count": 0, "failures": failures}
+
+    body = _build_saturday_driver_assignment_body(
+        sunday_date, assignments, all_riders, routes, stop_times_map
+    )
+
+    try:
+        sent = send_email(
+            to=", ".join(driver_emails),
+            subject=f"CFC Sunday Shuttle - Final Rider List - {_format_short_date(sunday_date)}",
+            body=body,
+            cc=f"{settings.OVERSEER_DRIVER_EMAIL}, {settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
+            bcc=settings.BCC_EMAIL,
+        )
+    except Exception as exc:
+        raise RuntimeError(f"Failed to send final rider list email: {exc}") from exc
+
+    if not sent:
+        failures.append({"driver_name": "all", "error": "send_email returned False."})
+        return {"sent_count": 0, "failures": failures}
+
+    return {"sent_count": 1, "failures": failures}
 
 
 def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
@@ -225,12 +324,29 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
             f"Failed to read rider counts for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
+    try:
+        routes = get_routes()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read routes: {exc}") from exc
+
+    try:
+        stop_times_map = get_stop_times_map()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read stop pickup times: {exc}") from exc
+
     shuttle_counts = counts.get(shuttle_id, {"total": 0, "stops": {}})
-    shuttle_label = SHUTTLE_NAMES.get(shuttle_id, shuttle_id)
+    route = _find_route(routes, shuttle_id)
+    if route:
+        shuttle_label = f"{route.get('shuttle_name', shuttle_id)} ({route.get('van', 'van TBD')})"
+    else:
+        shuttle_label = shuttle_id
 
     stop_lines = "\n".join(
-        f"- {stop}: {count} riders ({STOP_TIMES.get(stop, 'time TBD')})"
-        for stop, count in shuttle_counts["stops"].items()
+        f"- {stop}: {count} riders ({stop_times_map.get(stop, 'time TBD')})"
+        for stop, count in sorted(
+            shuttle_counts["stops"].items(),
+            key=lambda item: _stop_time_sort_key(item[0], stop_times_map),
+        )
     )
 
     body = (
@@ -247,7 +363,7 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
             to=settings.OVERSEER_DRIVER_EMAIL,
             subject=f"\U0001f6a8 SHUTTLE FULL - Action Required - Sunday {sunday_date}",
             body=body,
-            cc=settings.OVERSEER_RIDE_EMAIL,
+            cc=f"{settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
@@ -278,7 +394,8 @@ def _build_wednesday_reminder_body(
         assignments: This Sunday's assignment dicts (each with
             "driver_name"/"driver_id" and "route_id").
         routes: Route dicts from functions.read_sheets.get_routes(),
-            used to look up each shuttle's name, van, and full stop list.
+            used to look up each shuttle's name, van, full stop list,
+            and return departure_time.
 
     Returns:
         str: The complete plain-text email body.
@@ -304,15 +421,16 @@ def _build_wednesday_reminder_body(
             shuttle_name = route.get("shuttle_name", assignment.get("route_id"))
             van = route.get("van", "van TBD")
             stops = route.get("stops", [])
+            return_time = route.get("departure_time") or "time TBD"
         else:
             shuttle_name = assignment.get("route_name", assignment.get("route_id"))
             van = "van TBD"
             stops = []
+            return_time = "time TBD"
 
         # Only the "Shuttle N" part is uppercased - the van description
         # stays in its normal casing, e.g. "SHUTTLE 1 — Ford Transit (Gray)".
         shuttle_header = f"{shuttle_name.replace('Shuttle', 'SHUTTLE', 1)} \u2014 {van}"
-        return_time = RETURN_DEPARTURE_TIMES.get(assignment.get("route_id"), "time TBD")
 
         lines.append(_SECTION_DIVIDER)
         lines.append(shuttle_header)
@@ -357,6 +475,108 @@ def _build_wednesday_reminder_body(
     lines.append("")
     lines.append("---")
     lines.append("This is an automated reminder sent by the CFC Ride Coordination Agent.")
+
+    return "\n".join(lines)
+
+
+def _build_saturday_driver_assignment_body(
+    sunday_date: str,
+    assignments: list[dict],
+    all_riders: dict,
+    routes: list[dict],
+    stop_times_map: dict,
+) -> str:
+    """Build the final confirmed-rider-list email body for all drivers.
+
+    Args:
+        sunday_date: The Sunday date this list is for, in ISO
+            "YYYY-MM-DD" format.
+        assignments: This Sunday's assignment dicts (each with
+            "driver_name"/"driver_id" and "route_id").
+        all_riders: The dict returned by get_all_riders_for_sunday(),
+            used here for its "shuttle_riders" list.
+        routes: Route dicts from functions.read_sheets.get_routes(),
+            used to build each shuttle's name, van, full stop list, and
+            return departure_time live instead of from a hardcoded
+            lookup.
+        stop_times_map: {stop_name: pickup_time} from
+            functions.read_riders_sheet.get_stop_times_map(), used to
+            sort each shuttle's stops in pickup-time order.
+
+    Returns:
+        str: The complete plain-text email body.
+    """
+    driver_names = [assignment.get("driver_name") or assignment.get("driver_id") for assignment in assignments]
+    first_names = [name.split(" ")[0] for name in driver_names]
+
+    # Group confirmed rider names by shuttle, then stop.
+    names_by_shuttle_stop: dict[str, dict[str, list[str]]] = {}
+    for rider in all_riders["shuttle_riders"]:
+        stops = names_by_shuttle_stop.setdefault(rider["shuttle_id"], {})
+        stops.setdefault(rider["stop"], []).append(rider["name"])
+
+    lines = []
+    lines.append(f"Hi {_join_names(first_names)},")
+    lines.append("")
+    lines.append(
+        f"Here is your current rider list for Sunday, {_format_full_date(sunday_date)}. "
+        "You will receive an updated list if there are any changes."
+    )
+    lines.append("")
+
+    for assignment, driver_name in zip(assignments, driver_names):
+        shuttle_id = assignment.get("route_id")
+        route = _find_route(routes, shuttle_id)
+
+        if route:
+            van = route.get("van", "van TBD")
+            return_time = route.get("departure_time") or "time TBD"
+            # Every stop this shuttle serves, regardless of whether
+            # anyone signed up for it this week - straight from Sheets.
+            stops = sorted(
+                route.get("stops", []),
+                key=lambda stop: _stop_time_sort_key(stop.get("stop_name"), stop_times_map),
+            )
+        else:
+            van = "van TBD"
+            return_time = "time TBD"
+            stops = []
+
+        shuttle_number = shuttle_id[-1] if shuttle_id else "?"
+        total_riders = sum(len(names) for names in names_by_shuttle_stop.get(shuttle_id, {}).values())
+
+        lines.append(_SECTION_DIVIDER)
+        lines.append(f"SHUTTLE {shuttle_number} \u2014 {van}")
+        lines.append(f"Driver: {driver_name}")
+        lines.append(f"Total riders: {total_riders}")
+        lines.append(_SECTION_DIVIDER)
+        lines.append("Pickup Stops:")
+        lines.append("")
+
+        for stop in stops:
+            stop_name = stop.get("stop_name", "Unknown stop")
+            pickup_time = stop.get("pickup_time") or stop_times_map.get(stop_name, "time TBD")
+            lines.append(f"  \U0001f4cd {stop_name}: {pickup_time}")
+            names = names_by_shuttle_stop.get(shuttle_id, {}).get(stop_name, [])
+            if names:
+                for name in names:
+                    lines.append(f"      \u2022 {name}")
+            else:
+                lines.append("      No riders")
+            lines.append("")
+
+        lines.append(f"\U0001f504 Return departure from church: {return_time}")
+        lines.append(_SECTION_DIVIDER)
+        lines.append("")
+
+    lines.append(f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
+    lines.append(f"Questions about riders? Contact {OVERSEER_RIDE_CONTACT_NAME} at {settings.OVERSEER_RIDE_EMAIL}")
+    lines.append("")
+    lines.append("See you Sunday!")
+    lines.append("CFC Ride Coordination Team")
+    lines.append("")
+    lines.append("---")
+    lines.append("This is an automated email sent by the CFC Ride Coordination Agent.")
 
     return "\n".join(lines)
 
@@ -456,7 +676,7 @@ def _build_shuttle_counts(shuttle_riders: list[dict]) -> dict:
             that shuttle serves is included, even with a count of 0).
     """
     stops_by_shuttle: dict[str, list[str]] = {}
-    for stop, shuttle_id in STOP_TO_SHUTTLE.items():
+    for stop, shuttle_id in get_stop_to_shuttle_map().items():
         stops_by_shuttle.setdefault(shuttle_id, []).append(stop)
 
     counts: dict = {
@@ -474,7 +694,12 @@ def _build_shuttle_counts(shuttle_riders: list[dict]) -> dict:
 
 
 def _build_saturday_summary(
-    all_riders: dict, counts: dict, non_shuttle_riders: list[dict], full_shuttles: list[str]
+    all_riders: dict,
+    counts: dict,
+    non_shuttle_riders: list[dict],
+    over_capacity_shuttles: list[str],
+    routes: list[dict],
+    stop_times_map: dict,
 ) -> str:
     """Format the plain-text Saturday rider-count summary email body.
 
@@ -490,7 +715,17 @@ def _build_saturday_summary(
         counts: The dict returned by _build_shuttle_counts().
         non_shuttle_riders: Riders with shuttle_id None, each with
             "name" and "stop" (their typed Campus Address).
-        full_shuttles: shuttle_ids that have hit capacity.
+        over_capacity_shuttles: shuttle_ids with more than
+            MAX_RIDERS_PER_SHUTTLE riders signed up. No separate alert
+            email is sent for these anymore - a note is added inline
+            under that shuttle's total instead, so the coordinator can
+            act without a hard stop on signups.
+        routes: Route dicts from functions.read_sheets.get_routes(),
+            used to build each shuttle's display header live instead of
+            from a hardcoded lookup.
+        stop_times_map: {stop_name: pickup_time} from
+            functions.read_riders_sheet.get_stop_times_map(), used to
+            sort each shuttle's stops in pickup-time order.
 
     Returns:
         str: The formatted email body.
@@ -509,25 +744,35 @@ def _build_saturday_summary(
         "",
     ]
 
-    for shuttle_id, shuttle_label in SHUTTLE_NAMES.items():
-        shuttle_counts = counts.get(shuttle_id, {"total": 0, "stops": {}})
+    for route in routes:
+        shuttle_id = route.get("shuttle_id")
+        shuttle_name = route.get("shuttle_name", shuttle_id)
+        van = route.get("van", "van TBD")
         # Only the "Shuttle N" part is uppercased - the van description
-        # stays in its normal casing, e.g. "SHUTTLE 1 (Ford Transit - Gray)".
-        header_label = shuttle_label.replace("Shuttle", "SHUTTLE", 1)
+        # stays in its normal casing, e.g. "SHUTTLE 1 (Ford Transit (Gray))".
+        header_label = f"{shuttle_name.replace('Shuttle', 'SHUTTLE', 1)} ({van})"
+
+        shuttle_counts = counts.get(shuttle_id, {"total": 0, "stops": {}})
         lines.append(f"{header_label}: {_rider_count_text(shuttle_counts['total'])}")
 
-        for stop in sorted(shuttle_counts["stops"], key=_stop_time_sort_key):
+        if shuttle_id in over_capacity_shuttles:
+            lines.append(
+                f"\u26a0\ufe0f NOTE: This shuttle is over capacity "
+                f"(max {MAX_RIDERS_PER_SHUTTLE} riders)."
+            )
+            lines.append("Coordinator action may be needed.")
+
+        for stop in sorted(
+            shuttle_counts["stops"], key=lambda s: _stop_time_sort_key(s, stop_times_map)
+        ):
             count = shuttle_counts["stops"][stop]
-            lines.append(f"- {stop}: {_rider_count_text(count)} ({STOP_TIMES.get(stop, 'time TBD')})")
+            lines.append(f"- {stop}: {_rider_count_text(count)} ({stop_times_map.get(stop, 'time TBD')})")
             for name in names_by_shuttle_stop.get(shuttle_id, {}).get(stop, []):
                 lines.append(f"    \u2022 {name}")
 
-        if shuttle_id in full_shuttles:
-            lines.append(f"\u26a0\ufe0f SHUTTLE {shuttle_id[-1]} IS FULL (14/14)")
         lines.append("")
 
     lines.append(f"TOTAL: {_rider_count_text(all_riders['shuttle_total'])}")
-    lines.append("Deadline: Saturday 6 PM")
 
     if non_shuttle_riders:
         lines.append("")
@@ -560,18 +805,21 @@ def _rider_count_text(count: int) -> str:
     return f"{count} rider" if count == 1 else f"{count} riders"
 
 
-def _stop_time_sort_key(stop: str) -> time:
+def _stop_time_sort_key(stop: str, stop_times_map: dict) -> time:
     """Convert a stop's pickup time into a sortable value.
 
     Args:
-        stop: The stop name to look up in STOP_TIMES, e.g. "FAR".
+        stop: The stop name to look up, e.g. "FAR".
+        stop_times_map: {stop_name: pickup_time} built live from the
+            Routes sheet (see
+            functions.read_riders_sheet.get_stop_times_map()).
 
     Returns:
         time: The parsed pickup time, used as a sort key so stops
             display in pickup-time order rather than alphabetically.
-            Stops missing from STOP_TIMES sort last.
+            Stops missing from stop_times_map sort last.
     """
-    pickup_time = STOP_TIMES.get(stop)
+    pickup_time = stop_times_map.get(stop)
     if pickup_time is None:
         return time.max
     return datetime.strptime(pickup_time, "%I:%M %p").time()
