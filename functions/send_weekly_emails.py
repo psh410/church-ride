@@ -9,7 +9,7 @@ import logging
 from datetime import datetime, time
 
 from config import settings
-from db.firestore_client import get_assignment
+from db.firestore_client import get_semester_schedule
 from functions.read_riders_sheet import (
     MAX_RIDERS_PER_SHUTTLE,
     get_all_riders_for_sunday,
@@ -66,18 +66,31 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
             1 if the combined email was sent successfully, 0 otherwise.
 
     Raises:
-        RuntimeError: If assignments, routes, or driver data can't be
-            read.
+        RuntimeError: If the semester schedule, routes, or driver data
+            can't be read.
+
+    Note:
+        CC is settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL,
+        and settings.OVERSEER_RIDE_EMAIL_2, plus that week's backup
+        driver's email (looked up by name) if one is assigned and has
+        an email on file.
     """
     try:
-        assignments = get_assignment(sunday_date)
+        schedule = get_semester_schedule()
     except Exception as exc:
-        raise RuntimeError(
-            f"Failed to read assignments for sunday_date={sunday_date!r}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Failed to read semester schedule: {exc}") from exc
 
+    schedule_entry = _find_schedule_entry(schedule, sunday_date)
+    if schedule_entry is None:
+        logger.info(
+            "No semester schedule entry found for sunday_date=%r; nothing to remind.",
+            sunday_date,
+        )
+        return {"sent_count": 0, "failures": []}
+
+    assignments = _build_assignments_from_schedule(schedule_entry)
     if not assignments:
-        logger.info("No assignments found for sunday_date=%r; nothing to remind.", sunday_date)
+        logger.info("No drivers assigned for sunday_date=%r; nothing to remind.", sunday_date)
         return {"sent_count": 0, "failures": []}
 
     try:
@@ -112,14 +125,24 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
     if not driver_emails:
         return {"sent_count": 0, "failures": failures}
 
-    body = _build_wednesday_reminder_body(sunday_date, assignments, routes)
+    backup_name = schedule_entry.get("backup")
+    backup_driver = drivers_by_name.get(backup_name) if backup_name else None
+    backup_email = backup_driver.get("email") if backup_driver else None
+    if backup_name and not backup_email:
+        logger.warning("No email on file for backup driver %r; excluding from CC.", backup_name)
+
+    cc_parts = [settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL, settings.OVERSEER_RIDE_EMAIL_2]
+    if backup_email:
+        cc_parts.append(backup_email)
+
+    body = _build_wednesday_reminder_body(sunday_date, assignments, routes, backup_name)
 
     try:
         sent = send_email(
             to=", ".join(driver_emails),
             subject=f"CFC Sunday Shuttle Reminder - {_format_short_date(sunday_date)}",
             body=body,
-            cc=settings.OVERSEER_DRIVER_EMAIL,
+            cc=", ".join(cc_parts),
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
@@ -223,8 +246,8 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
             1 if the combined email was sent successfully, 0 otherwise.
 
     Raises:
-        RuntimeError: If riders, assignments, or driver data can't be
-            read.
+        RuntimeError: If riders, the semester schedule, or driver data
+            can't be read.
     """
     try:
         all_riders = get_all_riders_for_sunday(sunday_date)
@@ -234,14 +257,21 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
         ) from exc
 
     try:
-        assignments = get_assignment(sunday_date)
+        schedule = get_semester_schedule()
     except Exception as exc:
-        raise RuntimeError(
-            f"Failed to read assignments for sunday_date={sunday_date!r}: {exc}"
-        ) from exc
+        raise RuntimeError(f"Failed to read semester schedule: {exc}") from exc
 
+    schedule_entry = _find_schedule_entry(schedule, sunday_date)
+    if schedule_entry is None:
+        logger.info(
+            "No semester schedule entry found for sunday_date=%r; nothing to send.",
+            sunday_date,
+        )
+        return {"sent_count": 0, "failures": []}
+
+    assignments = _build_assignments_from_schedule(schedule_entry)
     if not assignments:
-        logger.info("No assignments found for sunday_date=%r; nothing to send.", sunday_date)
+        logger.info("No drivers assigned for sunday_date=%r; nothing to send.", sunday_date)
         return {"sent_count": 0, "failures": []}
 
     try:
@@ -384,7 +414,7 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
 # Helpers
 # --------------------------------------------------------------------------
 def _build_wednesday_reminder_body(
-    sunday_date: str, assignments: list[dict], routes: list[dict]
+    sunday_date: str, assignments: list[dict], routes: list[dict], backup: str | None = None
 ) -> str:
     """Build the combined Wednesday reminder email body for all drivers.
 
@@ -396,9 +426,15 @@ def _build_wednesday_reminder_body(
         routes: Route dicts from functions.read_sheets.get_routes(),
             used to look up each shuttle's name, van, full stop list,
             and return departure_time.
+        backup: This week's backup driver name from the semester
+            schedule entry's "backup" field, or None if no one was
+            available to be backup that week.
 
     Returns:
-        str: The complete plain-text email body.
+        str: The complete plain-text email body. Also reads
+            db.firestore_client.get_semester_schedule() internally to
+            list every remaining Sunday's drivers after sunday_date in
+            a "REST OF SEMESTER SCHEDULE" section.
     """
     driver_names = [assignment.get("driver_name") or assignment.get("driver_id") for assignment in assignments]
     first_names = [name.split(" ")[0] for name in driver_names]
@@ -447,6 +483,8 @@ def _build_wednesday_reminder_body(
         lines.append(_SECTION_DIVIDER)
         lines.append("")
 
+    lines.append(f"\U0001f504 Backup driver this week: {backup if backup else 'No backup this week'}")
+    lines.append("")
     lines.append("Please arrive at your first stop a few minutes early.")
     lines.append(f"Service starts at {SERVICE_TIME}.")
     lines.append(f"Church address: {CHURCH_ADDRESS}")
@@ -468,7 +506,36 @@ def _build_wednesday_reminder_body(
     lines.append("   - Close the box and press E to lock it")
     lines.append("   - Record the number of riders")
     lines.append("")
-    lines.append(f"Questions? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
+
+    try:
+        schedule = get_semester_schedule()
+    except Exception as exc:
+        logger.error("Failed to read semester schedule for rest-of-semester section: %s", exc)
+        schedule = []
+
+    remaining = [entry for entry in schedule if entry.get("date", "") > sunday_date]
+
+    lines.append(_SECTION_DIVIDER)
+    lines.append("\U0001f4c5 REST OF SEMESTER SCHEDULE")
+    lines.append(_SECTION_DIVIDER)
+    for entry in remaining:
+        entry_backup = entry.get("backup")
+        lines.append(
+            f"{_format_short_date(entry['date'])}: "
+            f"Shuttle 1 ({entry.get('shuttle_1')}), "
+            f"Shuttle 2 ({entry.get('shuttle_2')}), "
+            f"Backup ({entry_backup if entry_backup else 'None'})"
+        )
+    lines.append("")
+    lines.append("Note: No shuttle service on Nov 22 or Nov 29.")
+    lines.append(_SECTION_DIVIDER)
+    lines.append("")
+
+    lines.append(f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
+    lines.append(
+        f"Questions about riders? Contact {OVERSEER_RIDE_CONTACT_NAME} at "
+        f"{settings.OVERSEER_RIDE_EMAIL} or Ellie Kim at {settings.OVERSEER_RIDE_EMAIL_2}"
+    )
     lines.append("")
     lines.append("See you Sunday!")
     lines.append("CFC Ride Coordination Team")
@@ -617,6 +684,51 @@ def _scheduled_word(driver_count: int) -> str:
     if driver_count > 2:
         return "all"
     return ""
+
+
+def _find_schedule_entry(schedule: list[dict], sunday_date: str) -> dict | None:
+    """Find the semester schedule entry for a given Sunday date.
+
+    Args:
+        schedule: Semester schedule documents from
+            db.firestore_client.get_semester_schedule().
+        sunday_date: The Sunday date to match, in ISO "YYYY-MM-DD"
+            format.
+
+    Returns:
+        dict or None: The matching entry, or None if not found.
+    """
+    for entry in schedule:
+        if entry.get("date") == sunday_date:
+            return entry
+    return None
+
+
+def _build_assignments_from_schedule(entry: dict) -> list[dict]:
+    """Build assignment-shaped dicts from a semester schedule entry.
+
+    Turns a semester_schedule document's "shuttle_1"/"shuttle_2" driver
+    names into the {"driver_name", "route_id"} shape the rest of this
+    module already expects (matching the old Firestore "assignments"
+    collection's document shape), so _build_wednesday_reminder_body()
+    and _build_saturday_driver_assignment_body() don't need to change.
+
+    Args:
+        entry: One semester schedule document (see
+            db.firestore_client.get_semester_schedule() - has
+            "shuttle_1"/"shuttle_2" driver names keyed by shuttle_id).
+
+    Returns:
+        list[dict]: One dict per assigned shuttle, each with
+            "driver_name" and "route_id" (the shuttle_id). Shuttles
+            with no driver assigned that week are skipped.
+    """
+    assignments = []
+    for shuttle_id in ("shuttle_1", "shuttle_2"):
+        driver_name = entry.get(shuttle_id)
+        if driver_name:
+            assignments.append({"driver_name": driver_name, "route_id": shuttle_id})
+    return assignments
 
 
 def _find_route(routes: list[dict], shuttle_id: str) -> dict | None:

@@ -1,10 +1,14 @@
 # Sends the overseer a Monday update on the shuttle driver schedule
 # for the rest of the semester.
 #
-# Unlike functions/send_weekly_emails.py (which reads live Sheets/
-# Firestore data for one specific Sunday), this reads a hardcoded
-# SEMESTER_SCHEDULE constant covering the whole semester at once, so
-# it can report both last week's drivers and everything still to come.
+# Unlike functions/send_weekly_emails.py (which reads live Sheets data
+# for one specific Sunday), this reads the whole semester's schedule at
+# once from Firestore's "semester_schedule" collection, so it can
+# report both last week's drivers and everything still to come. Each
+# document has "date" (ISO "YYYY-MM-DD"), "shuttle_1"/"shuttle_2"
+# (driver names), "backup" (a third driver who can cover on short
+# notice, or None if no one else was available that week), and "past"
+# (whether that Sunday has already happened).
 
 from __future__ import annotations
 
@@ -12,6 +16,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from config import settings
+from db.firestore_client import get_semester_schedule
 from functions.send_email import send_email
 
 logger = logging.getLogger(__name__)
@@ -19,59 +24,33 @@ logger = logging.getLogger(__name__)
 # Visual divider used around each major section of the schedule email.
 _SECTION_DIVIDER = "=" * 40
 
-# Hardcoded Fall 2026 shuttle driver schedule, one entry per Sunday with
-# shuttle service. Each entry's "past" flag marks whether that Sunday
-# has already happened - send_monday_schedule() treats the most recent
-# "past": True entry as "last week" and reports every later entry as
-# the upcoming schedule. There's a gap between 2026-11-15 and
-# 2026-12-06 (no shuttle service on Nov 22 or Nov 29), which the email
-# body calls out explicitly.
-#
-# "backup" is a third driver (from the same 7-person pool, never
-# someone already driving that week) who can cover on short notice if
-# the primary driver has to swap out. Every primary and backup driver
-# in this schedule has been checked against actual conflict dates.
-# "backup" is None for weeks where no one else was actually available -
-# _build_schedule_body() shows "No backup this week" for those.
-SEMESTER_SCHEDULE = [
-    {"date": "2026-08-23", "shuttle_1": "Ryan Bielak", "shuttle_2": "Yong Wook Kim", "backup": None, "past": True},
-    {"date": "2026-08-30", "shuttle_1": "Sangwoo Suk", "shuttle_2": "Robin Varghese", "backup": "Peter Hahn", "past": False},
-    {"date": "2026-09-06", "shuttle_1": "Josiah Chong", "shuttle_2": "Albert Lee", "backup": "Peter Hahn", "past": False},
-    {"date": "2026-09-13", "shuttle_1": "Sangwoo Suk", "shuttle_2": "Peter Hahn", "backup": "Yong Wook Kim", "past": False},
-    {"date": "2026-09-20", "shuttle_1": "Sangwoo Suk", "shuttle_2": "Yong Wook Kim", "backup": None, "past": False},
-    {"date": "2026-09-27", "shuttle_1": "Ryan Bielak", "shuttle_2": "Robin Varghese", "backup": "Albert Lee", "past": False},
-    {"date": "2026-10-04", "shuttle_1": "Josiah Chong", "shuttle_2": "Peter Hahn", "backup": "Albert Lee", "past": False},
-    {"date": "2026-10-11", "shuttle_1": "Ryan Bielak", "shuttle_2": "Albert Lee", "backup": "Robin Varghese", "past": False},
-    {"date": "2026-10-18", "shuttle_1": "Sangwoo Suk", "shuttle_2": "Albert Lee", "backup": "Ryan Bielak", "past": False},
-    {"date": "2026-10-25", "shuttle_1": "Josiah Chong", "shuttle_2": "Robin Varghese", "backup": "Peter Hahn", "past": False},
-    {"date": "2026-11-01", "shuttle_1": "Ryan Bielak", "shuttle_2": "Yong Wook Kim", "backup": "Albert Lee", "past": False},
-    {"date": "2026-11-08", "shuttle_1": "Josiah Chong", "shuttle_2": "Peter Hahn", "backup": "Robin Varghese", "past": False},
-    {"date": "2026-11-15", "shuttle_1": "Sangwoo Suk", "shuttle_2": "Yong Wook Kim", "backup": "Albert Lee", "past": False},
-    {"date": "2026-12-06", "shuttle_1": "Josiah Chong", "shuttle_2": "Robin Varghese", "backup": "Peter Hahn", "past": False},
-    {"date": "2026-12-13", "shuttle_1": "Ryan Bielak", "shuttle_2": "Albert Lee", "backup": "Peter Hahn", "past": False},
-]
-
 
 def send_monday_schedule() -> dict:
     """Send the overseer this week's shuttle driver schedule update.
 
-    Reports last week's drivers (the most recent past Sunday in
-    SEMESTER_SCHEDULE) plus every remaining Sunday's assigned drivers
-    for the rest of the semester. No Claude drafting and no live
-    Sheets/Firestore reads are used - the schedule and the email body
-    are both built directly from the hardcoded SEMESTER_SCHEDULE.
+    Reports last week's drivers (the most recent past Sunday in the
+    semester schedule) plus every remaining Sunday's assigned drivers
+    for the rest of the semester. No Claude drafting is used - the
+    schedule is read live from Firestore's "semester_schedule"
+    collection and the email body is built directly from it.
 
     Returns:
         dict: {"status": "sent" or "failed"}.
     """
-    last_week = _find_last_week(SEMESTER_SCHEDULE)
-    if last_week is None:
-        logger.error("No past Sunday found in SEMESTER_SCHEDULE; nothing to report.")
+    try:
+        schedule = get_semester_schedule()
+    except Exception as exc:
+        logger.error("Failed to read semester schedule: %s", exc)
         return {"status": "failed"}
 
-    remaining = [entry for entry in SEMESTER_SCHEDULE if entry["date"] > last_week["date"]]
+    last_week = _find_last_week(schedule)
+    if last_week is None:
+        logger.error("No past Sunday found in semester schedule; nothing to report.")
+        return {"status": "failed"}
 
-    body = _build_schedule_body(last_week, remaining)
+    remaining = [entry for entry in schedule if entry["date"] > last_week["date"]]
+
+    body = _build_schedule_body(last_week, remaining, schedule)
     monday_date = _get_this_monday()
 
     try:
@@ -105,7 +84,8 @@ def _find_last_week(schedule: list[dict]) -> dict | None:
     case the "past" flags haven't been kept up to date.
 
     Args:
-        schedule: The full semester schedule (see SEMESTER_SCHEDULE).
+        schedule: The full semester schedule, from
+            db.firestore_client.get_semester_schedule().
 
     Returns:
         dict or None: The "last week" entry, or None if schedule is
@@ -123,14 +103,16 @@ def _find_last_week(schedule: list[dict]) -> dict | None:
     return None
 
 
-def _build_schedule_body(last_week: dict, remaining: list[dict]) -> str:
+def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[dict]) -> str:
     """Format the plain-text Monday schedule update email body.
 
     Args:
-        last_week: The SEMESTER_SCHEDULE entry for the most recent past
+        last_week: The semester schedule entry for the most recent past
             Sunday.
-        remaining: SEMESTER_SCHEDULE entries for every Sunday after
+        remaining: Semester schedule entries for every Sunday after
             last_week, in schedule order.
+        schedule: The full semester schedule (past and upcoming), used
+            to calculate the semester-wide driver totals section.
 
     Returns:
         str: The complete plain-text email body.
@@ -193,7 +175,7 @@ def _build_schedule_body(last_week: dict, remaining: list[dict]) -> str:
     lines.append(_SECTION_DIVIDER)
     lines.append("\U0001f4ca DRIVER TOTALS FOR THE SEMESTER")
     lines.append(_SECTION_DIVIDER)
-    for name, count in _calculate_driver_totals(SEMESTER_SCHEDULE):
+    for name, count in _calculate_driver_totals(schedule):
         lines.append(f"  {name}: {count} time{'s' if count != 1 else ''}")
     lines.append("")
 
@@ -218,8 +200,9 @@ def _calculate_driver_totals(schedule: list[dict]) -> list[tuple[str, int]]:
     being listed as a week's backup doesn't count toward these totals.
 
     Args:
-        schedule: The full semester schedule (see SEMESTER_SCHEDULE),
-            including past weeks, so totals reflect the whole semester.
+        schedule: The full semester schedule, from
+            db.firestore_client.get_semester_schedule(), including past
+            weeks, so totals reflect the whole semester.
 
     Returns:
         list[tuple[str, int]]: (driver_name, count) pairs, sorted by

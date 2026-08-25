@@ -23,6 +23,7 @@ DRIVERS_COLLECTION = "drivers"
 ROUTES_COLLECTION = "routes"
 ASSIGNMENTS_COLLECTION = "assignments"
 RUN_LOGS_COLLECTION = "run_logs"
+SEMESTER_SCHEDULE_COLLECTION = "semester_schedule"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -302,6 +303,33 @@ def get_assignment(sunday_date: str) -> list[dict]:
         raise RuntimeError(
             f"Failed to get assignments for sunday_date={sunday_date!r}: {exc}"
         ) from exc
+
+
+# --------------------------------------------------------------------------
+# SEMESTER SCHEDULE
+# --------------------------------------------------------------------------
+def get_semester_schedule() -> list[dict]:
+    """Return the full semester shuttle driver schedule, sorted by date.
+
+    Each document represents one Sunday's shuttle_1/shuttle_2/backup
+    driver assignments (see functions/send_semester_schedule.py for how
+    the returned entries are used to build the Monday schedule email
+    and to look up a given Sunday's drivers).
+
+    Returns:
+        list[dict]: Semester schedule documents (including their
+            Firestore doc "id"), sorted by "date" ascending. Empty list
+            if none are found.
+
+    Raises:
+        RuntimeError: If the query fails.
+    """
+    try:
+        client = get_client()
+        query = client.collection(SEMESTER_SCHEDULE_COLLECTION).order_by("date")
+        return [_doc_to_dict(doc) for doc in query.stream()]
+    except Exception as exc:
+        raise RuntimeError(f"Failed to get semester schedule: {exc}") from exc
 
 
 # --------------------------------------------------------------------------
