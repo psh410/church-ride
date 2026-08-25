@@ -570,7 +570,10 @@ def _build_saturday_driver_assignment_body(
         lines.append("")
 
     lines.append(f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
-    lines.append(f"Questions about riders? Contact {OVERSEER_RIDE_CONTACT_NAME} at {settings.OVERSEER_RIDE_EMAIL}")
+    lines.append(
+        f"Questions about riders? Contact {OVERSEER_RIDE_CONTACT_NAME} at "
+        f"{settings.OVERSEER_RIDE_EMAIL} or Ellie Kim at {settings.OVERSEER_RIDE_EMAIL_2}"
+    )
     lines.append("")
     lines.append("See you Sunday!")
     lines.append("CFC Ride Coordination Team")

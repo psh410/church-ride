@@ -50,6 +50,13 @@ BCC_EMAIL = os.getenv("BCC_EMAIL")
 RIDER_SHEET_ID = os.getenv("RIDER_SHEET_ID")
 GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 
+# Path to the service account JSON key file used for Gmail API
+# domain-wide delegation (see functions/send_email.py). This is the
+# same standard env var Google's client libraries read automatically
+# elsewhere (e.g. google.auth.default() in functions/read_sheets.py) -
+# it's exposed here as a setting so send_email.py can load it explicitly.
+GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+
 # OVERSEER_EMAILS is stored as a comma-separated string in .env
 # (e.g. "alice@example.com,bob@example.com") and parsed into a list here.
 _overseer_emails_raw = os.getenv("OVERSEER_EMAILS", "")
@@ -77,6 +84,7 @@ _REQUIRED_SETTINGS = {
     "BCC_EMAIL": BCC_EMAIL,
     "GMAIL_APP_PASSWORD": GMAIL_APP_PASSWORD,
     "RIDER_SHEET_ID": RIDER_SHEET_ID,
+    "GOOGLE_APPLICATION_CREDENTIALS": GOOGLE_APPLICATION_CREDENTIALS,
 }
 
 
