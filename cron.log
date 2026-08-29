@@ -3,3 +3,6 @@
 /Users/ph/church-rides/venv/lib/python3.11/site-packages/google/cloud/firestore_v1/base_collection.py:317: UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
   return query.where(field_path, op_string, value)
 {'sent_count': 1, 'failures': []}
+/Users/ph/church-rides/venv/lib/python3.11/site-packages/google/cloud/firestore_v1/base_collection.py:317: UserWarning: Detected filter using positional arguments. Prefer using the 'filter' keyword argument instead.
+  return query.where(field_path, op_string, value)
+{'sent_count': 1, 'failures': []}

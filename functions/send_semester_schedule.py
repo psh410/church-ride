@@ -162,8 +162,8 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
     for entry in remaining:
         backup = entry.get("backup")
         lines.append(_format_short_date(entry["date"]))
-        lines.append(f"  \U0001f690 Shuttle 1 (Gray Van): {entry['shuttle_1']}")
-        lines.append(f"  \U0001f690 Shuttle 2 (Silver Van): {entry['shuttle_2']}")
+        lines.append(f"  \U0001f690 Shuttle 1 (Gray Van): {_format_shuttle_driver_text(entry, 'shuttle_1')}")
+        lines.append(f"  \U0001f690 Shuttle 2 (Silver Van): {_format_shuttle_driver_text(entry, 'shuttle_2')}")
         lines.append(f"  \U0001f504 Backup: {backup if backup else 'No backup this week'}")
         lines.append("")
 
@@ -191,6 +191,33 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
     lines.append("This is an automated email sent by the CFC Ride Coordination Agent.")
 
     return "\n".join(lines)
+
+
+def _format_shuttle_driver_text(entry: dict, shuttle_id: str) -> str:
+    """Format a shuttle's driver name(s) for one schedule entry line.
+
+    Shows a single name for a normal week, or "Pickup: X, Return: Y"
+    when that shuttle has a split shift (different drivers covering
+    the pickup vs. return leg) that week. Falls back to the plain
+    "shuttle_N" value if the "_pickup"/"_return" fields aren't present
+    (e.g. before scripts/update_split_shifts.py has run).
+
+    Args:
+        entry: One semester schedule document (see
+            db.firestore_client.get_semester_schedule()).
+        shuttle_id: Which shuttle to format, "shuttle_1" or
+            "shuttle_2".
+
+    Returns:
+        str: e.g. "Sangwoo Suk" or "Pickup: Ryan Bielak, Return: Sangwoo Suk".
+    """
+    base_name = entry.get(shuttle_id)
+    pickup_driver = entry.get(f"{shuttle_id}_pickup") or base_name
+    return_driver = entry.get(f"{shuttle_id}_return") or base_name
+
+    if pickup_driver and return_driver and pickup_driver != return_driver:
+        return f"Pickup: {pickup_driver}, Return: {return_driver}"
+    return pickup_driver or return_driver or "TBD"
 
 
 def _calculate_driver_totals(schedule: list[dict]) -> list[tuple[str, int]]:

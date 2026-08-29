@@ -70,7 +70,11 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
             can't be read.
 
     Note:
-        CC is settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL,
+        "To" includes every distinct pickup and return driver across
+        both shuttles - on a normal week that's the two primary
+        drivers, but a split-shift week (different people covering the
+        pickup vs. return leg) can include up to 4 people. CC is
+        settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL,
         and settings.OVERSEER_RIDE_EMAIL_2, plus that week's backup
         driver's email (looked up by name) if one is assigned and has
         an email on file.
@@ -110,11 +114,13 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
             f"Failed to read driver details for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
+    # Every distinct pickup/return driver across both shuttles gets the
+    # reminder - a split-shift week may have up to 4 different people.
+    driver_names = _unique_driver_names(assignments)
     driver_emails = []
     failures: list[dict] = []
 
-    for assignment in assignments:
-        driver_name = assignment.get("driver_name") or assignment.get("driver_id")
+    for driver_name in driver_names:
         driver = drivers_by_name.get(driver_name)
         if driver is None or not driver.get("email"):
             logger.error("No email on file for driver %r; excluding from reminder.", driver_name)
@@ -248,6 +254,12 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
     Raises:
         RuntimeError: If riders, the semester schedule, or driver data
             can't be read.
+
+    Note:
+        "To" includes every distinct pickup and return driver across
+        both shuttles - on a normal week that's the two primary
+        drivers, but a split-shift week (different people covering the
+        pickup vs. return leg) can include up to 4 people.
     """
     try:
         all_riders = get_all_riders_for_sunday(sunday_date)
@@ -296,11 +308,13 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
             f"Failed to read driver details for sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
+    # Every distinct pickup/return driver across both shuttles gets the
+    # final list - a split-shift week may have up to 4 different people.
+    driver_names = _unique_driver_names(assignments)
     driver_emails = []
     failures: list[dict] = []
 
-    for assignment in assignments:
-        driver_name = assignment.get("driver_name") or assignment.get("driver_id")
+    for driver_name in driver_names:
         driver = drivers_by_name.get(driver_name)
         if driver is None or not driver.get("email"):
             logger.error("No email on file for driver %r; excluding from final list.", driver_name)
@@ -422,7 +436,8 @@ def _build_wednesday_reminder_body(
         sunday_date: The Sunday date this reminder is for, in ISO
             "YYYY-MM-DD" format.
         assignments: This Sunday's assignment dicts (each with
-            "driver_name"/"driver_id" and "route_id").
+            "route_id", "pickup_driver", and "return_driver" - see
+            _build_assignments_from_schedule()).
         routes: Route dicts from functions.read_sheets.get_routes(),
             used to look up each shuttle's name, van, full stop list,
             and return departure_time.
@@ -436,7 +451,7 @@ def _build_wednesday_reminder_body(
             list every remaining Sunday's drivers after sunday_date in
             a "REST OF SEMESTER SCHEDULE" section.
     """
-    driver_names = [assignment.get("driver_name") or assignment.get("driver_id") for assignment in assignments]
+    driver_names = _unique_driver_names(assignments)
     first_names = [name.split(" ")[0] for name in driver_names]
 
     scheduled_word = _scheduled_word(len(driver_names))
@@ -450,8 +465,10 @@ def _build_wednesday_reminder_body(
         "",
     ]
 
-    for assignment, driver_name in zip(assignments, driver_names):
+    for assignment in assignments:
         route = _find_route(routes, assignment.get("route_id"))
+        pickup_driver = assignment.get("pickup_driver")
+        return_driver = assignment.get("return_driver")
 
         if route:
             shuttle_name = route.get("shuttle_name", assignment.get("route_id"))
@@ -470,7 +487,11 @@ def _build_wednesday_reminder_body(
 
         lines.append(_SECTION_DIVIDER)
         lines.append(shuttle_header)
-        lines.append(f"Driver: {driver_name}")
+        if pickup_driver and return_driver and pickup_driver != return_driver:
+            lines.append(f"Pickup Driver: {pickup_driver}")
+            lines.append(f"Return Driver: {return_driver}")
+        else:
+            lines.append(f"Driver: {pickup_driver or return_driver}")
         lines.append(_SECTION_DIVIDER)
         lines.append("Pickup Stops:")
         for stop in stops:
@@ -522,8 +543,8 @@ def _build_wednesday_reminder_body(
         entry_backup = entry.get("backup")
         lines.append(
             f"{_format_short_date(entry['date'])}: "
-            f"Shuttle 1 ({entry.get('shuttle_1')}), "
-            f"Shuttle 2 ({entry.get('shuttle_2')}), "
+            f"Shuttle 1 ({_format_shuttle_driver_text(entry, 'shuttle_1')}), "
+            f"Shuttle 2 ({_format_shuttle_driver_text(entry, 'shuttle_2')}), "
             f"Backup ({entry_backup if entry_backup else 'None'})"
         )
     lines.append("")
@@ -559,7 +580,8 @@ def _build_saturday_driver_assignment_body(
         sunday_date: The Sunday date this list is for, in ISO
             "YYYY-MM-DD" format.
         assignments: This Sunday's assignment dicts (each with
-            "driver_name"/"driver_id" and "route_id").
+            "route_id", "pickup_driver", and "return_driver" - see
+            _build_assignments_from_schedule()).
         all_riders: The dict returned by get_all_riders_for_sunday(),
             used here for its "shuttle_riders" list.
         routes: Route dicts from functions.read_sheets.get_routes(),
@@ -573,7 +595,7 @@ def _build_saturday_driver_assignment_body(
     Returns:
         str: The complete plain-text email body.
     """
-    driver_names = [assignment.get("driver_name") or assignment.get("driver_id") for assignment in assignments]
+    driver_names = _unique_driver_names(assignments)
     first_names = [name.split(" ")[0] for name in driver_names]
 
     # Group confirmed rider names by shuttle, then stop.
@@ -591,8 +613,10 @@ def _build_saturday_driver_assignment_body(
     )
     lines.append("")
 
-    for assignment, driver_name in zip(assignments, driver_names):
+    for assignment in assignments:
         shuttle_id = assignment.get("route_id")
+        pickup_driver = assignment.get("pickup_driver")
+        return_driver = assignment.get("return_driver")
         route = _find_route(routes, shuttle_id)
 
         if route:
@@ -614,7 +638,11 @@ def _build_saturday_driver_assignment_body(
 
         lines.append(_SECTION_DIVIDER)
         lines.append(f"SHUTTLE {shuttle_number} \u2014 {van}")
-        lines.append(f"Driver: {driver_name}")
+        if pickup_driver and return_driver and pickup_driver != return_driver:
+            lines.append(f"Pickup Driver: {pickup_driver}")
+            lines.append(f"Return Driver: {return_driver}")
+        else:
+            lines.append(f"Driver: {pickup_driver or return_driver}")
         lines.append(f"Total riders: {total_riders}")
         lines.append(_SECTION_DIVIDER)
         lines.append("Pickup Stops:")
@@ -708,27 +736,92 @@ def _build_assignments_from_schedule(entry: dict) -> list[dict]:
     """Build assignment-shaped dicts from a semester schedule entry.
 
     Turns a semester_schedule document's "shuttle_1"/"shuttle_2" driver
-    names into the {"driver_name", "route_id"} shape the rest of this
-    module already expects (matching the old Firestore "assignments"
-    collection's document shape), so _build_wednesday_reminder_body()
-    and _build_saturday_driver_assignment_body() don't need to change.
+    names - and their "shuttle_1_pickup"/"shuttle_1_return" (and
+    shuttle_2 equivalent) split-shift variants, if present - into the
+    shape the rest of this module expects.
 
     Args:
         entry: One semester schedule document (see
             db.firestore_client.get_semester_schedule() - has
-            "shuttle_1"/"shuttle_2" driver names keyed by shuttle_id).
+            "shuttle_1"/"shuttle_2" driver names, and optionally
+            "shuttle_1_pickup"/"shuttle_1_return" and
+            "shuttle_2_pickup"/"shuttle_2_return" for weeks with a
+            split shift). If the "_pickup"/"_return" fields are
+            missing (e.g. before scripts/update_split_shifts.py has
+            run), they fall back to the plain "shuttle_N" value.
 
     Returns:
         list[dict]: One dict per assigned shuttle, each with
-            "driver_name" and "route_id" (the shuttle_id). Shuttles
-            with no driver assigned that week are skipped.
+            "route_id" (the shuttle_id), "pickup_driver", and
+            "return_driver" (the same name as each other for a normal,
+            non-split week). Shuttles with no driver assigned that
+            week are skipped.
     """
     assignments = []
     for shuttle_id in ("shuttle_1", "shuttle_2"):
-        driver_name = entry.get(shuttle_id)
-        if driver_name:
-            assignments.append({"driver_name": driver_name, "route_id": shuttle_id})
+        base_name = entry.get(shuttle_id)
+        pickup_driver = entry.get(f"{shuttle_id}_pickup") or base_name
+        return_driver = entry.get(f"{shuttle_id}_return") or base_name
+        if pickup_driver or return_driver:
+            assignments.append(
+                {
+                    "route_id": shuttle_id,
+                    "pickup_driver": pickup_driver,
+                    "return_driver": return_driver,
+                }
+            )
     return assignments
+
+
+def _format_shuttle_driver_text(entry: dict, shuttle_id: str) -> str:
+    """Format a shuttle's driver name(s) for the rest-of-semester line.
+
+    Shows a single name for a normal week, or "Pickup: X, Return: Y"
+    when that shuttle has a split shift (different drivers covering
+    the pickup vs. return leg) that week. Falls back to the plain
+    "shuttle_N" value if the "_pickup"/"_return" fields aren't present
+    (e.g. before scripts/update_split_shifts.py has run).
+
+    Args:
+        entry: One semester schedule entry (see
+            db.firestore_client.get_semester_schedule()).
+        shuttle_id: Which shuttle to format, "shuttle_1" or
+            "shuttle_2".
+
+    Returns:
+        str: e.g. "Sangwoo Suk" or "Pickup: Ryan Bielak, Return: Sangwoo Suk".
+    """
+    base_name = entry.get(shuttle_id)
+    pickup_driver = entry.get(f"{shuttle_id}_pickup") or base_name
+    return_driver = entry.get(f"{shuttle_id}_return") or base_name
+
+    if pickup_driver and return_driver and pickup_driver != return_driver:
+        return f"Pickup: {pickup_driver}, Return: {return_driver}"
+    return pickup_driver or return_driver or "TBD"
+
+
+def _unique_driver_names(assignments: list[dict]) -> list[str]:
+    """Collect every unique driver name across a list of assignments.
+
+    Each assignment may cover a single driver (pickup_driver ==
+    return_driver) or two different people on a split shift - either
+    way, every distinct name that needs to be greeted and emailed is
+    included exactly once.
+
+    Args:
+        assignments: Assignment dicts from
+            _build_assignments_from_schedule(), each with
+            "pickup_driver" and "return_driver".
+
+    Returns:
+        list[str]: Unique driver names, in order of first appearance.
+    """
+    names: list[str] = []
+    for assignment in assignments:
+        for name in (assignment.get("pickup_driver"), assignment.get("return_driver")):
+            if name and name not in names:
+                names.append(name)
+    return names
 
 
 def _find_route(routes: list[dict], shuttle_id: str) -> dict | None:
@@ -955,6 +1048,30 @@ def _to_sheet_date_format(iso_date: str) -> str:
     """
     parsed = datetime.strptime(iso_date, "%Y-%m-%d")
     return f"{parsed.month}/{parsed.day}/{parsed.strftime('%y')}"
+
+
+def preview_wednesday_reminder(sunday_date: str) -> str:
+    """Preview the Wednesday reminder body without sending.
+
+    TEMPORARY debug helper - not called by any scheduled job. Useful
+    for checking what send_wednesday_reminder() would email out for a
+    given Sunday, without actually sending anything.
+
+    Args:
+        sunday_date: The Sunday date to preview, in ISO "YYYY-MM-DD"
+            format.
+
+    Returns:
+        str: The rendered email body, or a "No schedule entry found"
+            message if sunday_date has no semester schedule entry.
+    """
+    schedule = get_semester_schedule()
+    entry = _find_schedule_entry(schedule, sunday_date)
+    if not entry:
+        return f"No schedule entry found for {sunday_date}"
+    assignments = _build_assignments_from_schedule(entry)
+    routes = get_routes()
+    return _build_wednesday_reminder_body(sunday_date, assignments, routes, entry.get("backup"))
 
 
 def main() -> None:

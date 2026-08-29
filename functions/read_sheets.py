@@ -87,8 +87,10 @@ def get_available_drivers(sunday_date: str) -> list[dict]:
 
     Returns:
         list[dict]: One dict per available driver with keys "name",
-            "email", "phone", "age_range", "conflict_dates", and
-            "additional_comments". Empty list if no row matches
+            "email", "phone", "age_range", "conflict_dates",
+            "additional_comments", and "shift" (one of "Both",
+            "Pickup", or "Drop-off" - defaults to "Both" if the driver
+            didn't answer that question). Empty list if no row matches
             sunday_date or no drivers are listed for it.
 
     Raises:
@@ -150,7 +152,7 @@ def _get_form_responses() -> dict[str, dict]:
     """Read the Form Responses 1 tab and index driver details by name.
 
     Expected columns: Timestamp, Full Name, Email Address, Phone Number,
-    Conflict Dates, Additional Comments, Age Range.
+    Conflict Dates, Additional Comments, Age Range, Shift.
 
     Returns:
         dict[str, dict]: Maps each driver's full name to their details
@@ -181,6 +183,7 @@ def _get_form_responses() -> dict[str, dict]:
     conflict_dates_idx = _find_column_index(header, "Conflict Dates")
     comments_idx = _find_column_index(header, "Additional Comments")
     age_range_idx = _find_column_index(header, "Age Range")
+    shift_idx = _find_column_index(header, "Shift")
 
     responses: dict[str, dict] = {}
     for row in rows[1:]:
@@ -202,6 +205,7 @@ def _get_form_responses() -> dict[str, dict]:
             "age_range": _cell(row, age_range_idx) or None,
             "conflict_dates": conflict_dates,
             "additional_comments": _cell(row, comments_idx) or None,
+            "shift": _cell(row, shift_idx) or "Both",
         }
 
     return responses
@@ -442,7 +446,8 @@ def get_all_drivers_with_history(sunday_date: str) -> list[dict]:
             for, formatted to match the sheet, e.g. "8/23/26".
 
     Returns:
-        list[dict]: Each available driver's details merged with their
+        list[dict]: Each available driver's details (including "shift",
+            one of "Both", "Pickup", or "Drop-off") merged with their
             driving history ("times_driven", "last_driven_date",
             "sundays_driven") and "total_available_sundays_remaining"
             (how many Sundays they're listed as available for, minus how
