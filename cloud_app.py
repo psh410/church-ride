@@ -36,6 +36,18 @@ def health() -> tuple:
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/debug-settings", methods=["GET"])
+def debug_settings():
+    """Temporary debug endpoint to check which settings loaded."""
+    from config import settings
+    return jsonify({
+        "GOOGLE_CLOUD_PROJECT": settings.GOOGLE_CLOUD_PROJECT,
+        "RIDER_SHEET_ID": settings.RIDER_SHEET_ID,
+        "SHEETS_ID": settings.SHEETS_ID,
+        "ADMIN_EMAIL": settings.ADMIN_EMAIL,
+    })
+
+
 # ============================================
 # TEST ENDPOINTS - safe to call anytime, only
 # emails peterhahn410@gmail.com
@@ -44,29 +56,48 @@ def health() -> tuple:
 
 @app.route("/test-saturday-update", methods=["POST"])
 def test_saturday_update() -> tuple:
-    """Test endpoint - sends Saturday update only to admin, not real overseers.
+    """Test endpoint - sends the REAL Saturday update, admin only.
 
-    For safe testing before deployment.
+    Doesn't build its own summary - instead calls the real
+    send_saturday_update() (same email-building logic as production)
+    but temporarily monkey-patches settings.OVERSEER_DRIVER_EMAIL,
+    settings.OVERSEER_RIDE_EMAIL, settings.OVERSEER_RIDE_EMAIL_2, and
+    settings.BCC_EMAIL to peterhahn410@gmail.com for the duration of
+    this one request, so the To/Cc/Bcc all resolve to admin only. The
+    originals are always restored in a finally block, even if the call
+    raises, so production settings are never left overridden.
 
     Returns:
-        tuple: ({"status": "sent" or "failed"}, 200) on success, or
+        tuple: (result dict plus a "note" key, 200) on success, or
             ({"status": "error", "error": str}, 500) on failure.
     """
+    from config import settings
+
+    real_driver_email = settings.OVERSEER_DRIVER_EMAIL
+    real_ride_email = settings.OVERSEER_RIDE_EMAIL
+    real_ride_email_2 = settings.OVERSEER_RIDE_EMAIL_2
+    real_bcc = settings.BCC_EMAIL
+
     try:
-        from functions.read_riders_sheet import get_next_sunday_date, get_all_riders_for_sunday
-        from functions.send_email import send_email
+        settings.OVERSEER_DRIVER_EMAIL = "peterhahn410@gmail.com"
+        settings.OVERSEER_RIDE_EMAIL = "peterhahn410@gmail.com"
+        settings.OVERSEER_RIDE_EMAIL_2 = "peterhahn410@gmail.com"
+        settings.BCC_EMAIL = "peterhahn410@gmail.com"
+
         sunday = get_next_sunday_date()
-        data = get_all_riders_for_sunday(sunday)
-        body = f"TEST EMAIL - Sunday: {sunday}\nTotal: {data['total']}\nShuttle: {data['shuttle_total']}\nNon-shuttle: {data['non_shuttle_total']}"
-        result = send_email(
-            to="peterhahn410@gmail.com",
-            subject="TEST - Cloud App Saturday Update",
-            body=body
-        )
-        return jsonify({"status": "sent" if result else "failed"}), 200
+        result = send_saturday_update(sunday)
+
+        return jsonify(
+            {**result, "note": "test only - full content, sent to admin only"}
+        ), 200
     except Exception as exc:
         logger.error("Test saturday update failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
+    finally:
+        settings.OVERSEER_DRIVER_EMAIL = real_driver_email
+        settings.OVERSEER_RIDE_EMAIL = real_ride_email
+        settings.OVERSEER_RIDE_EMAIL_2 = real_ride_email_2
+        settings.BCC_EMAIL = real_bcc
 
 
 @app.route("/test-wednesday-reminder", methods=["POST"])

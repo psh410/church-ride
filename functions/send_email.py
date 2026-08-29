@@ -9,9 +9,12 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
+import google.auth
+from google.auth.transport.requests import Request
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -34,12 +37,27 @@ def send_email(
 ) -> bool:
     """Send a plain-text email via the Gmail API with domain-wide delegation.
 
-    Loads service account credentials from the JSON key file at
-    settings.GOOGLE_APPLICATION_CREDENTIALS, then impersonates
-    settings.ADMIN_EMAIL via credentials.with_subject() so the message
-    is sent (and appears) as that mailbox - no per-user OAuth consent
-    screen or Gmail app password is needed, just the domain-wide
-    delegation grant configured in Google Workspace admin.
+    Loads credentials one of two ways, depending on the environment:
+    - Local development: if settings.GOOGLE_APPLICATION_CREDENTIALS
+      points to a JSON key file that exists on disk, credentials are
+      loaded from it via
+      service_account.Credentials.from_service_account_file(), which
+      always supports with_subject() impersonation.
+    - Cloud Run (or anywhere else without that key file): falls back
+      to google.auth.default(). Whether *those* credentials support
+      with_subject() depends on what's actually backing Application
+      Default Credentials at runtime - a real service account key
+      does, but some other ADC types (e.g. Compute Engine metadata
+      credentials) don't support impersonation this way at all. This
+      is checked explicitly with hasattr(), and a clear RuntimeError
+      is raised (caught below, returns False) rather than silently
+      sending as the wrong identity if it's unsupported.
+
+    Either way, once we have credentials that support it, they
+    impersonate settings.ADMIN_EMAIL via credentials.with_subject() so
+    the message is sent (and appears) as that mailbox - no per-user
+    OAuth consent screen or Gmail app password is needed, just the
+    domain-wide delegation grant configured in Google Workspace admin.
 
     Args:
         to: Recipient email address.
@@ -57,11 +75,42 @@ def send_email(
         bool: True if the email was sent successfully, False otherwise.
     """
     try:
-        credentials = service_account.Credentials.from_service_account_file(
-            settings.GOOGLE_APPLICATION_CREDENTIALS,
-            scopes=[_GMAIL_SEND_SCOPE],
-        )
-        delegated_credentials = credentials.with_subject(settings.ADMIN_EMAIL)
+        if settings.GOOGLE_APPLICATION_CREDENTIALS and os.path.exists(
+            settings.GOOGLE_APPLICATION_CREDENTIALS
+        ):
+            # Local development - a key file is present on disk.
+            credentials = service_account.Credentials.from_service_account_file(
+                settings.GOOGLE_APPLICATION_CREDENTIALS,
+                scopes=[_GMAIL_SEND_SCOPE],
+            )
+            delegated_credentials = credentials.with_subject(settings.ADMIN_EMAIL)
+        else:
+            # Cloud Run (or any environment without a key file) - use
+            # the runtime's Application Default Credentials instead.
+            credentials, _ = google.auth.default(scopes=[_GMAIL_SEND_SCOPE])
+
+            if not hasattr(credentials, "with_subject"):
+                # These ADC aren't backed by a service account identity
+                # that supports impersonation - there's no way to send
+                # as settings.ADMIN_EMAIL this way.
+                raise RuntimeError(
+                    "Cloud Run's default service account credentials don't "
+                    "support domain-wide delegation via with_subject(). "
+                    "Either grant the runtime service account domain-wide "
+                    "delegation for the gmail.send scope in Google "
+                    "Workspace admin (so google.auth.default() returns "
+                    "impersonation-capable credentials), or set "
+                    "GOOGLE_APPLICATION_CREDENTIALS to a service account "
+                    "key file instead."
+                )
+
+            delegated_credentials = credentials.with_subject(settings.ADMIN_EMAIL)
+            # Force an immediate token fetch under the impersonated
+            # identity, so any delegation misconfiguration surfaces
+            # here (and gets logged clearly) instead of failing deep
+            # inside the Gmail API call below.
+            delegated_credentials.refresh(Request())
+
         service = build("gmail", "v1", credentials=delegated_credentials)
 
         message = MIMEMultipart()

@@ -50,6 +50,32 @@ def _get_secret(name: str, default: str = None) -> str:
     except Exception:
         return default
 
+
+def _setup_service_account_key() -> str | None:
+    """Write the service account key from Secret Manager to a temp file, for use where a local key file is expected (Gmail domain-wide delegation).
+
+    Returns the temp file path, or None if running locally with
+    GOOGLE_APPLICATION_CREDENTIALS already pointing to a real file.
+    """
+    import os
+
+    existing_path = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+    if existing_path and os.path.exists(existing_path):
+        # Already have a real local file - use it as is
+        return existing_path
+
+    # Try to get the key from Secret Manager and write it to a temp file
+    key_json = _get_secret("SERVICE_ACCOUNT_KEY_JSON")
+    if not key_json:
+        return None
+
+    import tempfile
+
+    temp_path = os.path.join(tempfile.gettempdir(), "service-account-key.json")
+    with open(temp_path, "w") as f:
+        f.write(key_json)
+    return temp_path
+
 # --------------------------------------------------------------------------
 # System limits and scheduling constants
 # --------------------------------------------------------------------------
@@ -96,7 +122,7 @@ GMAIL_APP_PASSWORD = _get_secret("GMAIL_APP_PASSWORD")
 # same standard env var Google's client libraries read automatically
 # elsewhere (e.g. google.auth.default() in functions/read_sheets.py) -
 # it's exposed here as a setting so send_email.py can load it explicitly.
-GOOGLE_APPLICATION_CREDENTIALS = _get_secret("GOOGLE_APPLICATION_CREDENTIALS")
+GOOGLE_APPLICATION_CREDENTIALS = _setup_service_account_key()
 
 GOOGLE_MAPS_API_KEY = _get_secret("GOOGLE_MAPS_API_KEY")
 

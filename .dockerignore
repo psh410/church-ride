@@ -1,0 +1,16 @@
+venv/
+.env
+.git/
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+church-rides-key.json
+*.log
+send_update.sh
+send_wednesday_reminder.sh
+send_semester_schedule.sh
+send_driver_assignment.sh
+cron.log
+README.md
