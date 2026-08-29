@@ -176,7 +176,7 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
     lines.append("\U0001f4ca DRIVER TOTALS FOR THE SEMESTER")
     lines.append(_SECTION_DIVIDER)
     for name, count in _calculate_driver_totals(schedule):
-        lines.append(f"  {name}: {count} time{'s' if count != 1 else ''}")
+        lines.append(f"  {name}: {_format_driver_count(count)} time{'s' if count != 1 else ''}")
     lines.append("")
 
     lines.append(
@@ -220,11 +220,20 @@ def _format_shuttle_driver_text(entry: dict, shuttle_id: str) -> str:
     return pickup_driver or return_driver or "TBD"
 
 
-def _calculate_driver_totals(schedule: list[dict]) -> list[tuple[str, int]]:
+def _calculate_driver_totals(schedule: list[dict]) -> list[tuple[str, float]]:
     """Count how many times each driver is scheduled to drive this semester.
 
     Only counts actual driving assignments ("shuttle_1"/"shuttle_2") -
     being listed as a week's backup doesn't count toward these totals.
+
+    For a shuttle/week where the same person covers both the pickup and
+    return legs, that person gets a full +1.0. For a split shift (a
+    different driver on pickup vs. return), each of those two drivers
+    gets +0.5 instead, since neither drove the whole shift. Falls back
+    to the plain "shuttle_N" value for both legs if the "_pickup"/
+    "_return" fields aren't present (e.g. before
+    scripts/update_split_shifts.py has run), which counts as a normal
+    +1.0 for that one driver.
 
     Args:
         schedule: The full semester schedule, from
@@ -232,17 +241,42 @@ def _calculate_driver_totals(schedule: list[dict]) -> list[tuple[str, int]]:
             weeks, so totals reflect the whole semester.
 
     Returns:
-        list[tuple[str, int]]: (driver_name, count) pairs, sorted by
+        list[tuple[str, float]]: (driver_name, count) pairs, sorted by
             count descending, then alphabetically by name for ties.
     """
-    totals: dict[str, int] = {}
+    totals: dict[str, float] = {}
     for entry in schedule:
         for key in ("shuttle_1", "shuttle_2"):
-            name = entry.get(key)
-            if name:
-                totals[name] = totals.get(name, 0) + 1
+            base_name = entry.get(key)
+            pickup_driver = entry.get(f"{key}_pickup") or base_name
+            return_driver = entry.get(f"{key}_return") or base_name
+
+            if not pickup_driver and not return_driver:
+                continue
+
+            if pickup_driver and return_driver and pickup_driver != return_driver:
+                totals[pickup_driver] = totals.get(pickup_driver, 0) + 0.5
+                totals[return_driver] = totals.get(return_driver, 0) + 0.5
+            else:
+                name = pickup_driver or return_driver
+                totals[name] = totals.get(name, 0) + 1.0
 
     return sorted(totals.items(), key=lambda pair: (-pair[1], pair[0]))
+
+
+def _format_driver_count(count: float) -> str:
+    """Format a driver total for display, dropping a trailing ".0".
+
+    Split shifts can produce half-counts (e.g. 4.5), but whole counts
+    should still read as "5", not "5.0".
+
+    Args:
+        count: A driver's semester total from _calculate_driver_totals().
+
+    Returns:
+        str: e.g. "5" for 5.0, or "4.5" for 4.5.
+    """
+    return f"{count:g}"
 
 
 def _get_this_monday() -> str:
