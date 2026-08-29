@@ -273,7 +273,11 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
         "To" includes every distinct pickup and return driver across
         both shuttles - on a normal week that's the two primary
         drivers, but a split-shift week (different people covering the
-        pickup vs. return leg) can include up to 4 people.
+        pickup vs. return leg) can include up to 4 people. CC is
+        settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL,
+        and settings.OVERSEER_RIDE_EMAIL_2, plus that week's backup
+        driver's email (looked up by name) if one is assigned and has
+        an email on file.
     """
     try:
         all_riders = get_all_riders_for_sunday(sunday_date)
@@ -339,6 +343,16 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
     if not driver_emails:
         return {"sent_count": 0, "failures": failures}
 
+    backup_name = schedule_entry.get("backup")
+    backup_driver = drivers_by_name.get(backup_name) if backup_name else None
+    backup_email = backup_driver.get("email") if backup_driver else None
+    if backup_name and not backup_email:
+        logger.warning("No email on file for backup driver %r; excluding from CC.", backup_name)
+
+    cc_parts = [settings.OVERSEER_DRIVER_EMAIL, settings.OVERSEER_RIDE_EMAIL, settings.OVERSEER_RIDE_EMAIL_2]
+    if backup_email:
+        cc_parts.append(backup_email)
+
     body = _build_saturday_driver_assignment_body(
         sunday_date, assignments, all_riders, routes, stop_times_map
     )
@@ -348,7 +362,7 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
             to=", ".join(driver_emails),
             subject=f"CFC Sunday Shuttle - Final Rider List - {_format_short_date(sunday_date)}",
             body=body,
-            cc=f"{settings.OVERSEER_DRIVER_EMAIL}, {settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
+            cc=", ".join(cc_parts),
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
