@@ -71,11 +71,13 @@ def test_saturday_update() -> tuple:
 
 @app.route("/test-wednesday-reminder", methods=["POST"])
 def test_wednesday_reminder() -> tuple:
-    """Test endpoint - sends a Wednesday reminder summary only to admin.
+    """Test endpoint - sends the REAL Wednesday reminder body, admin only.
 
     Doesn't call send_wednesday_reminder() directly (that would email
-    the real drivers) - instead builds a plain-text summary of that
-    week's schedule entry and emails it to peterhahn410@gmail.com only.
+    the real drivers) - instead reuses its exact body-building logic
+    (_build_wednesday_reminder_body() and friends) so the test email's
+    content matches production exactly, but overrides the recipient to
+    peterhahn410@gmail.com only.
 
     Returns:
         tuple: ({"status": "sent" or "failed", "note": str}, 200) on
@@ -84,32 +86,35 @@ def test_wednesday_reminder() -> tuple:
     """
     try:
         from db.firestore_client import get_semester_schedule
+        from functions.read_sheets import get_routes
         from functions.send_email import send_email
+        from functions.send_weekly_emails import (
+            _build_assignments_from_schedule,
+            _build_wednesday_reminder_body,
+            _find_schedule_entry,
+        )
 
         sunday = get_next_sunday_date()
         schedule = get_semester_schedule()
-        entry = next((e for e in schedule if e.get("date") == sunday), None)
+        entry = _find_schedule_entry(schedule, sunday)
 
         if entry is None:
             body = f"TEST EMAIL - Wednesday Reminder\nSunday: {sunday}\nNo schedule entry found for this date."
         else:
-            body = (
-                f"TEST EMAIL - Wednesday Reminder\n"
-                f"Sunday: {sunday}\n"
-                f"Shuttle 1: {entry.get('shuttle_1')}\n"
-                f"Shuttle 2: {entry.get('shuttle_2')}\n"
-                f"Backup: {entry.get('backup') or 'None'}"
-            )
+            assignments = _build_assignments_from_schedule(entry)
+            routes = get_routes()
+            backup = entry.get("backup")
+            body = _build_wednesday_reminder_body(sunday, assignments, routes, backup)
 
         result = send_email(
             to="peterhahn410@gmail.com",
-            subject="TEST - Cloud App Wednesday Reminder",
+            subject="TEST - Full Wednesday Reminder",
             body=body,
         )
         return jsonify(
             {
                 "status": "sent" if result else "failed",
-                "note": "test only - not sent to real drivers",
+                "note": "test only - full content, sent to admin only",
             }
         ), 200
     except Exception as exc:

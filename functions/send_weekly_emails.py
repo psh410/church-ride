@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import urllib.parse
 from datetime import datetime, time
 
 from config import settings
@@ -28,6 +29,18 @@ CHURCH_ADDRESS = "2906 Crossing Ct, Champaign, IL"
 SERVICE_TIME = "9:30 AM"
 OVERSEER_DRIVER_CONTACT_NAME = "Dae Kang"
 OVERSEER_RIDE_CONTACT_NAME = "Sarah Choi"
+
+# Full street addresses for each stop, used to build a Google Maps link
+# under that stop's pickup time in the Wednesday reminder email. Stops
+# with no entry here just don't get a map link, they still show their
+# name/time as usual.
+STOP_ADDRESSES: dict[str, str] = {
+    "FAR": "1001 W College Ct, Urbana, IL 61801",
+    "Allen": "1005 W Gregory Dr, Urbana, IL 61801",
+    "SDRP": "301 E Gregory Dr, Champaign, IL 61820",
+    "ISR": "1010 W Illinois St, Urbana, IL 61801",
+    "Icon": "309 E Springfield Ave, Champaign, IL 61820",
+}
 
 # Visual divider used around each driver's assignment block in the
 # Wednesday reminder email.
@@ -429,86 +442,83 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
 # Helpers
 # --------------------------------------------------------------------------
 def _build_wednesday_reminder_body(
-    sunday_date: str, assignments: list[dict], routes: list[dict], backup: str | None = None
+    sunday_date: str,
+    assignments: list[dict],
+    routes: list[dict],
+    backup: str | None = None,
 ) -> str:
-    """Build the combined Wednesday reminder email body for all drivers.
+    """Build the Wednesday reminder email body for assigned drivers.
+
+    Shows each shuttle's driver(s), pickup stops in chronological
+    order with addresses and Google Maps links, van instructions,
+    backup driver, and the rest-of-semester schedule.
 
     Args:
-        sunday_date: The Sunday date this reminder is for, in ISO
-            "YYYY-MM-DD" format.
-        assignments: This Sunday's assignment dicts (each with
-            "route_id", "pickup_driver", and "return_driver" - see
-            _build_assignments_from_schedule()).
-        routes: Route dicts from functions.read_sheets.get_routes(),
-            used to look up each shuttle's name, van, full stop list,
-            and return departure_time.
-        backup: This week's backup driver name from the semester
-            schedule entry's "backup" field, or None if no one was
-            available to be backup that week.
+        sunday_date: ISO date string for the upcoming Sunday.
+        assignments: List of dicts with route_id, pickup_driver,
+            return_driver (or plain driver name if not split).
+        routes: Route data from get_routes(), with stops and times.
+        backup: Name of this week's backup driver, or None.
 
     Returns:
-        str: The complete plain-text email body. Also reads
-            db.firestore_client.get_semester_schedule() internally to
-            list every remaining Sunday's drivers after sunday_date in
-            a "REST OF SEMESTER SCHEDULE" section.
+        str: The full email body text.
     """
-    driver_names = _unique_driver_names(assignments)
-    first_names = [name.split(" ")[0] for name in driver_names]
+    lines = []
+    names = _unique_driver_names(assignments)
+    greeting_names = _join_names(names)
+    sunday_full = _format_full_date(sunday_date)
 
-    scheduled_word = _scheduled_word(len(driver_names))
-    scheduled_phrase = f"you are {scheduled_word} scheduled" if scheduled_word else "you are scheduled"
-
-    lines = [
-        f"Hi {_join_names(first_names)},",
-        "",
-        f"This is a reminder that {scheduled_phrase} to drive this Sunday, "
-        f"{_format_full_date(sunday_date)} at Covenant Fellowship Church.",
-        "",
-    ]
+    lines.append(f"Hi {greeting_names},")
+    lines.append("")
+    lines.append(
+        f"This is a reminder that you are scheduled to drive "
+        f"this Sunday, {sunday_full} at Covenant Fellowship Church."
+    )
+    lines.append("")
 
     for assignment in assignments:
-        route = _find_route(routes, assignment.get("route_id"))
-        pickup_driver = assignment.get("pickup_driver")
-        return_driver = assignment.get("return_driver")
+        route_id = assignment["route_id"]
+        route = next((r for r in routes if r["shuttle_id"] == route_id), None)
+        if not route:
+            continue
 
-        if route:
-            shuttle_name = route.get("shuttle_name", assignment.get("route_id"))
-            van = route.get("van", "van TBD")
-            stops = route.get("stops", [])
-            return_time = route.get("departure_time") or "time TBD"
-        else:
-            shuttle_name = assignment.get("route_name", assignment.get("route_id"))
-            van = "van TBD"
-            stops = []
-            return_time = "time TBD"
-
-        # Only the "Shuttle N" part is uppercased - the van description
-        # stays in its normal casing, e.g. "SHUTTLE 1 — Ford Transit (Gray)".
-        shuttle_header = f"{shuttle_name.replace('Shuttle', 'SHUTTLE', 1)} \u2014 {van}"
+        van = route.get("van", "")
+        shuttle_num = route_id[-1]
+        pickup_driver = assignment.get("pickup_driver") or assignment.get("driver_name")
+        return_driver = assignment.get("return_driver") or assignment.get("driver_name")
 
         lines.append(_SECTION_DIVIDER)
-        lines.append(shuttle_header)
-        if pickup_driver and return_driver and pickup_driver != return_driver:
+        lines.append(f"SHUTTLE {shuttle_num} \u2014 {van}")
+        if pickup_driver == return_driver:
+            lines.append(f"Driver: {pickup_driver}")
+        else:
             lines.append(f"Pickup Driver: {pickup_driver}")
             lines.append(f"Return Driver: {return_driver}")
-        else:
-            lines.append(f"Driver: {pickup_driver or return_driver}")
         lines.append(_SECTION_DIVIDER)
         lines.append("Pickup Stops:")
-        for stop in stops:
-            lines.append(
-                f"  \U0001f4cd {stop.get('stop_name', 'Unknown stop')}: "
-                f"{stop.get('pickup_time', 'time TBD')}"
-            )
         lines.append("")
-        lines.append(f"\U0001f504 Return departure from church: {return_time}")
+
+        stops = sorted(route.get("stops", []), key=lambda stop: _parse_pickup_time(stop.get("pickup_time")))
+        for stop in stops:
+            stop_name = stop["stop_name"]
+            pickup_time = stop["pickup_time"]
+            lines.append(f"  \U0001f4cd {stop_name}: {pickup_time}")
+            address = STOP_ADDRESSES.get(stop_name)
+            if address:
+                encoded = urllib.parse.quote_plus(address)
+                map_url = f"https://www.google.com/maps/search/?api=1&query={encoded}"
+                lines.append(f"     {map_url}")
+            lines.append("")
+
+        departure_time = route.get("departure_time", "")
+        lines.append(f"\U0001f504 Return departure from church: {departure_time}")
         lines.append(_SECTION_DIVIDER)
         lines.append("")
 
     lines.append(f"\U0001f504 Backup driver this week: {backup if backup else 'No backup this week'}")
     lines.append("")
     lines.append("Please arrive at your first stop a few minutes early.")
-    lines.append(f"Service starts at {SERVICE_TIME}.")
+    lines.append("Service starts at 9:30 AM.")
     lines.append(f"Church address: {CHURCH_ADDRESS}")
     lines.append("")
     lines.append("---")
@@ -516,10 +526,8 @@ def _build_wednesday_reminder_body(
     lines.append("")
     lines.append("1. Pickup & Key Access")
     lines.append("   - Van location: Parked in the church parking lot")
-    lines.append(
-        "   - Key lockbox: Located on the wall in the old kitchen "
-        "(next to the conference room)"
-    )
+    lines.append("   - Key lockbox: Located on the wall in the old kitchen")
+    lines.append("     (next to the conference room)")
     lines.append("   - Unlock code: 2906E")
     lines.append("")
     lines.append("2. Return & Drop-Off")
@@ -531,29 +539,31 @@ def _build_wednesday_reminder_body(
 
     try:
         schedule = get_semester_schedule()
+        remaining = [e for e in schedule if e.get("date", "") > sunday_date]
+        lines.append(_SECTION_DIVIDER)
+        lines.append("\U0001f4c5 REST OF SEMESTER SCHEDULE")
+        lines.append(_SECTION_DIVIDER)
+        for entry in remaining:
+            shuttle_1_text = _format_shuttle_driver_text(entry, "shuttle_1")
+            shuttle_2_text = _format_shuttle_driver_text(entry, "shuttle_2")
+            entry_backup = entry.get("backup")
+            lines.append(
+                f"{_format_short_date(entry['date'])}: "
+                f"Shuttle 1 ({shuttle_1_text}), "
+                f"Shuttle 2 ({shuttle_2_text}), "
+                f"Backup ({entry_backup if entry_backup else 'None'})"
+            )
+        lines.append("")
+        lines.append("Note: No shuttle service on Nov 22 or Nov 29.")
+        lines.append(_SECTION_DIVIDER)
+        lines.append("")
     except Exception as exc:
         logger.error("Failed to read semester schedule for rest-of-semester section: %s", exc)
-        schedule = []
 
-    remaining = [entry for entry in schedule if entry.get("date", "") > sunday_date]
-
-    lines.append(_SECTION_DIVIDER)
-    lines.append("\U0001f4c5 REST OF SEMESTER SCHEDULE")
-    lines.append(_SECTION_DIVIDER)
-    for entry in remaining:
-        entry_backup = entry.get("backup")
-        lines.append(
-            f"{_format_short_date(entry['date'])}: "
-            f"Shuttle 1 ({_format_shuttle_driver_text(entry, 'shuttle_1')}), "
-            f"Shuttle 2 ({_format_shuttle_driver_text(entry, 'shuttle_2')}), "
-            f"Backup ({entry_backup if entry_backup else 'None'})"
-        )
-    lines.append("")
-    lines.append("Note: No shuttle service on Nov 22 or Nov 29.")
-    lines.append(_SECTION_DIVIDER)
-    lines.append("")
-
-    lines.append(f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
+    lines.append(
+        f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} "
+        f"at {settings.OVERSEER_DRIVER_EMAIL}"
+    )
     lines.append(
         f"Questions about riders? Contact {OVERSEER_RIDE_CONTACT_NAME} at "
         f"{settings.OVERSEER_RIDE_EMAIL} or Ellie Kim at {settings.OVERSEER_RIDE_EMAIL_2}"
@@ -695,24 +705,6 @@ def _join_names(names: list[str]) -> str:
     if len(names) == 2:
         return f"{names[0]} and {names[1]}"
     return f"{', '.join(names[:-1])}, and {names[-1]}"
-
-
-def _scheduled_word(driver_count: int) -> str:
-    """Pick the word describing how many drivers are scheduled.
-
-    Args:
-        driver_count: Number of drivers in this reminder.
-
-    Returns:
-        str: "both" for exactly two drivers, "all" for three or more,
-            or "" for a single driver (the caller drops the word
-            entirely in that case).
-    """
-    if driver_count == 2:
-        return "both"
-    if driver_count > 2:
-        return "all"
-    return ""
 
 
 def _find_schedule_entry(schedule: list[dict], sunday_date: str) -> dict | None:
@@ -1049,6 +1041,29 @@ def _stop_time_sort_key(stop: str, stop_times_map: dict) -> time:
     if pickup_time is None:
         return time.max
     return datetime.strptime(pickup_time, "%I:%M %p").time()
+
+
+def _parse_pickup_time(pickup_time: str | None) -> time:
+    """Convert a raw pickup_time string into a sortable time value.
+
+    Same parsing approach as _stop_time_sort_key(), but for callers
+    that already have a stop's pickup_time string in hand (e.g. from a
+    route dict's "stops" list) instead of needing a stop_times_map
+    lookup by name.
+
+    Args:
+        pickup_time: A "H:MM AM/PM" string, or None/empty if missing.
+
+    Returns:
+        time: The parsed time, or time.max if pickup_time is missing
+            or unparseable (sorts last).
+    """
+    if not pickup_time:
+        return time.max
+    try:
+        return datetime.strptime(pickup_time, "%I:%M %p").time()
+    except ValueError:
+        return time.max
 
 
 def _to_sheet_date_format(iso_date: str) -> str:
