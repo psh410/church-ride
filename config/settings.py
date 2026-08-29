@@ -9,6 +9,47 @@ from dotenv import load_dotenv
 # and this simply becomes a no-op if no .env file is present.
 load_dotenv()
 
+
+def _get_secret(name: str, default: str = None) -> str:
+    """Get a config value - from .env locally, from Secret Manager in the cloud.
+
+    Checks the process environment first (populated from .env locally
+    by load_dotenv() above, or set directly as real env vars in a cloud
+    deployment). If the variable isn't set there, falls back to Google
+    Secret Manager - this lets production read secrets that were never
+    put in .env/real env vars at all, without requiring a local
+    Secret Manager setup for everyday development.
+
+    Args:
+        name: The environment variable / secret name to look up, e.g.
+            "ANTHROPIC_API_KEY".
+        default: The value to return if name isn't found in either the
+            environment or Secret Manager. Defaults to None.
+
+    Returns:
+        str: The resolved value, or default if it can't be found
+            anywhere.
+    """
+    value = os.getenv(name)
+    if value:
+        return value
+
+    # Not found and we're not guaranteed to be running in a cloud
+    # environment with Secret Manager access - try anyway, but fall
+    # back to default rather than raising if it's unavailable (e.g.
+    # local dev with no Secret Manager credentials, or the secret
+    # simply doesn't exist).
+    try:
+        from google.cloud import secretmanager
+
+        project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "church-rides")
+        client = secretmanager.SecretManagerServiceClient()
+        secret_path = f"projects/{project_id}/secrets/{name}/versions/latest"
+        response = client.access_secret_version(request={"name": secret_path})
+        return response.payload.data.decode("UTF-8")
+    except Exception:
+        return default
+
 # --------------------------------------------------------------------------
 # System limits and scheduling constants
 # --------------------------------------------------------------------------
@@ -39,34 +80,34 @@ DEAD_MAN_HOUR = "10:00"
 # --------------------------------------------------------------------------
 # Secrets and environment-specific configuration (loaded from .env)
 # --------------------------------------------------------------------------
-ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
-GOOGLE_CLOUD_PROJECT = os.getenv("GOOGLE_CLOUD_PROJECT")
-ADMIN_EMAIL = os.getenv("ADMIN_EMAIL")
-SHEETS_ID = os.getenv("SHEETS_ID")
-OVERSEER_RIDE_EMAIL = os.getenv("OVERSEER_RIDE_EMAIL")
-OVERSEER_RIDE_EMAIL_2 = os.getenv("OVERSEER_RIDE_EMAIL_2")
-OVERSEER_DRIVER_EMAIL = os.getenv("OVERSEER_DRIVER_EMAIL")
-BCC_EMAIL = os.getenv("BCC_EMAIL")
-RIDER_SHEET_ID = os.getenv("RIDER_SHEET_ID")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
+ANTHROPIC_API_KEY = _get_secret("ANTHROPIC_API_KEY")
+GOOGLE_CLOUD_PROJECT = _get_secret("GOOGLE_CLOUD_PROJECT")
+ADMIN_EMAIL = _get_secret("ADMIN_EMAIL")
+SHEETS_ID = _get_secret("SHEETS_ID")
+OVERSEER_RIDE_EMAIL = _get_secret("OVERSEER_RIDE_EMAIL")
+OVERSEER_RIDE_EMAIL_2 = _get_secret("OVERSEER_RIDE_EMAIL_2")
+OVERSEER_DRIVER_EMAIL = _get_secret("OVERSEER_DRIVER_EMAIL")
+BCC_EMAIL = _get_secret("BCC_EMAIL")
+RIDER_SHEET_ID = _get_secret("RIDER_SHEET_ID")
+GMAIL_APP_PASSWORD = _get_secret("GMAIL_APP_PASSWORD")
 
 # Path to the service account JSON key file used for Gmail API
 # domain-wide delegation (see functions/send_email.py). This is the
 # same standard env var Google's client libraries read automatically
 # elsewhere (e.g. google.auth.default() in functions/read_sheets.py) -
 # it's exposed here as a setting so send_email.py can load it explicitly.
-GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
+GOOGLE_APPLICATION_CREDENTIALS = _get_secret("GOOGLE_APPLICATION_CREDENTIALS")
 
-GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+GOOGLE_MAPS_API_KEY = _get_secret("GOOGLE_MAPS_API_KEY")
 
 # OVERSEER_EMAILS is stored as a comma-separated string in .env
 # (e.g. "alice@example.com,bob@example.com") and parsed into a list here.
-_overseer_emails_raw = os.getenv("OVERSEER_EMAILS", "")
+_overseer_emails_raw = _get_secret("OVERSEER_EMAILS", "")
 OVERSEER_EMAILS = [
     email.strip() for email in _overseer_emails_raw.split(",") if email.strip()
 ]
 
-DISCORD_BOT_TOKEN = os.getenv("DISCORD_BOT_TOKEN")
+DISCORD_BOT_TOKEN = _get_secret("DISCORD_BOT_TOKEN")
 
 # --------------------------------------------------------------------------
 # Validation
