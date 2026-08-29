@@ -57,6 +57,8 @@ GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD")
 # it's exposed here as a setting so send_email.py can load it explicitly.
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 
+GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+
 # OVERSEER_EMAILS is stored as a comma-separated string in .env
 # (e.g. "alice@example.com,bob@example.com") and parsed into a list here.
 _overseer_emails_raw = os.getenv("OVERSEER_EMAILS", "")
@@ -85,6 +87,7 @@ _REQUIRED_SETTINGS = {
     "GMAIL_APP_PASSWORD": GMAIL_APP_PASSWORD,
     "RIDER_SHEET_ID": RIDER_SHEET_ID,
     "GOOGLE_APPLICATION_CREDENTIALS": GOOGLE_APPLICATION_CREDENTIALS,
+    "GOOGLE_MAPS_API_KEY": GOOGLE_MAPS_API_KEY,
 }
 
 

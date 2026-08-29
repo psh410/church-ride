@@ -18,6 +18,7 @@ from functions.read_riders_sheet import (
     get_stop_times_map,
     get_stop_to_shuttle_map,
 )
+from functions.generate_map import build_map_legend, build_static_map_url
 from functions.read_sheets import get_all_drivers_with_history, get_routes
 from functions.send_email import send_email
 
@@ -913,8 +914,9 @@ def _build_saturday_summary(
 
     Leads with a total-requests header (shuttle vs. non-shuttle), then
     the usual shuttle breakdown (counts and rider names per stop), then
-    - if there are any - a list of non-shuttle riders who still need a
-    personal driver coordinated.
+    a rider-locations map (a Static Maps URL plus a text legend, via
+    functions.generate_map), then - if there are any - a list of
+    non-shuttle riders who still need a personal driver coordinated.
 
     Args:
         all_riders: The dict returned by get_all_riders_for_sunday(),
@@ -981,6 +983,22 @@ def _build_saturday_summary(
         lines.append("")
 
     lines.append(f"TOTAL: {_rider_count_text(all_riders['shuttle_total'])}")
+
+    # Flatten counts' per-shuttle "stops" dicts into one {stop_name: count}
+    # dict - build_static_map_url()/build_map_legend() key off stop name,
+    # not shuttle_id.
+    flat_stop_counts: dict[str, int] = {}
+    for shuttle_counts in counts.values():
+        flat_stop_counts.update(shuttle_counts["stops"])
+
+    map_url = build_static_map_url(flat_stop_counts)
+    legend = build_map_legend(flat_stop_counts, all_riders["non_shuttle_total"])
+
+    lines.append("")
+    lines.append("\U0001f5fa\ufe0f RIDER LOCATIONS MAP")
+    lines.append(map_url)
+    lines.append("")
+    lines.append(legend)
 
     if non_shuttle_riders:
         lines.append("")
