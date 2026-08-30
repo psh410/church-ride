@@ -637,6 +637,8 @@ def _build_saturday_driver_assignment_body(
         "You will receive an updated list if there are any changes."
     )
     lines.append("")
+    lines.append("Note: Routes or stops may still change slightly. The final version will be sent by 7:00 AM Sunday.")
+    lines.append("")
 
     for assignment in assignments:
         shuttle_id = assignment.get("route_id")
