@@ -230,10 +230,10 @@ def send_saturday_update(sunday_date: str) -> dict:
 
     try:
         sent = send_email(
-            to=settings.OVERSEER_DRIVER_EMAIL,
+            to=f"{settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
             subject=f"CFC Shuttle Update - Sunday {sunday_date}",
             body=body,
-            cc=f"{settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
+            cc=settings.OVERSEER_DRIVER_EMAIL,
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
