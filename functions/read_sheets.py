@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 # Read-only scope is sufficient - this module never writes to Sheets.
 _SHEETS_READONLY_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
-# Tab (sheet) names within the SHEETS_ID spreadsheet.
+# Tab (sheet) names. Available Drivers and Form Responses 1 live on the
+# driver spreadsheet (settings.SHEETS_ID). Routes lives on the rider
+# spreadsheet (settings.RIDER_SHEET_ID).
 AVAILABLE_DRIVERS_TAB = "Available Drivers"
 FORM_RESPONSES_TAB = "Form Responses 1"
 ROUTES_TAB = "Routes"
@@ -217,6 +219,9 @@ def _get_form_responses() -> dict[str, dict]:
 def get_routes() -> list[dict]:
     """Return all routes (shuttles) and their stops from the Routes tab.
 
+    Reads the "Routes" tab on the rider spreadsheet
+    (settings.RIDER_SHEET_ID), not the driver spreadsheet.
+
     Row 1 is headers (shuttle_id, shuttle_name, van, stop_name,
     pickup_time, departure_time); data starts on row 2. Rows sharing the
     same shuttle_id are grouped into a single route dict.
@@ -239,7 +244,7 @@ def get_routes() -> list[dict]:
         result = (
             service.spreadsheets()
             .values()
-            .get(spreadsheetId=settings.SHEETS_ID, range=ROUTES_TAB)
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=ROUTES_TAB)
             .execute()
         )
         rows = result.get("values", [])

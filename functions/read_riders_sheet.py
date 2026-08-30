@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 # Tab name within the settings.RIDER_SHEET_ID spreadsheet.
 FORM_RESPONSES_TAB = "Form Responses 1"
 
-# Tab name within the settings.SHEETS_ID (driver) spreadsheet - holds
+# Tab name within the settings.RIDER_SHEET_ID (rider) spreadsheet - holds
 # each shuttle's vehicle info (make/model/year/color/capacity), one row
 # per attribute and one column per shuttle_id. See
 # get_shuttle_capacities() for the exact layout.
@@ -143,7 +143,7 @@ def get_shuttle_capacities() -> dict:
     Lets different shuttles have different capacities (e.g. a smaller
     van seating fewer riders than a full-size one) instead of the one
     flat MAX_RIDERS_PER_SHUTTLE applied to every shuttle. Reads the
-    "Shuttles" tab in the driver spreadsheet (settings.SHEETS_ID) -
+    "Shuttles" tab in the rider spreadsheet (settings.RIDER_SHEET_ID) -
     NOT the "Routes" tab, which has no capacity data. The "Shuttles"
     tab is laid out with one row per vehicle attribute and one column
     per shuttle, e.g.:
@@ -179,7 +179,7 @@ def get_shuttle_capacities() -> dict:
         result = (
             service.spreadsheets()
             .values()
-            .get(spreadsheetId=settings.SHEETS_ID, range=SHUTTLES_TAB)
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=SHUTTLES_TAB)
             .execute()
         )
         rows = result.get("values", [])
@@ -319,7 +319,7 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
             }
         )
 
-    return riders
+    return _deduplicate_riders(riders)
 
 
 def get_all_riders_for_sunday(sunday_date: str) -> dict:
@@ -487,6 +487,110 @@ def _get_signup_window(sunday_date: str) -> tuple[datetime, datetime]:
     window_end = datetime.combine(target_date, time(9, 0))
 
     return window_start, window_end
+
+
+def _deduplicate_riders(riders: list[dict]) -> list[dict]:
+    """Keep one signup per person, preferring the latest submission.
+
+    Two entries are treated as the same person only if their emails
+    match (case-insensitive) or their phone numbers match after
+    stripping non-digits. Name is never used as a match key, since
+    different students can share a name. Entries with neither an
+    email nor a phone are left untouched - there's no safe way to
+    tell whether they're duplicates.
+
+    When a duplicate group is found, the entry with the latest
+    submitted_at is kept and the rest are dropped, with a warning
+    logged for each removal.
+
+    Args:
+        riders: Rider dicts as built by get_riders_for_sunday().
+
+    Returns:
+        list[dict]: The same riders, with later duplicate submissions
+            removed. Relative order of the remaining entries is
+            preserved.
+    """
+    if not riders:
+        return riders
+
+    def normalize_email(email: str | None) -> str:
+        return email.strip().lower() if email else ""
+
+    def normalize_phone(phone: str | None) -> str:
+        return "".join(ch for ch in str(phone) if ch.isdigit()) if phone else ""
+
+    identifiable: list[dict] = []
+    for rider in riders:
+        if normalize_email(rider.get("email")) or normalize_phone(rider.get("phone")):
+            identifiable.append(rider)
+
+    parent = list(range(len(identifiable)))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        root_left, root_right = find(left), find(right)
+        if root_left != root_right:
+            parent[root_right] = root_left
+
+    email_to_index: dict[str, int] = {}
+    phone_to_index: dict[str, int] = {}
+    for index, rider in enumerate(identifiable):
+        email = normalize_email(rider.get("email"))
+        phone = normalize_phone(rider.get("phone"))
+        if email:
+            if email in email_to_index:
+                union(index, email_to_index[email])
+            else:
+                email_to_index[email] = index
+        if phone:
+            if phone in phone_to_index:
+                union(index, phone_to_index[phone])
+            else:
+                phone_to_index[phone] = index
+
+    groups: dict[int, list[dict]] = {}
+    for index, rider in enumerate(identifiable):
+        groups.setdefault(find(index), []).append(rider)
+
+    winners: set[int] = set()
+    for group in groups.values():
+        winner = max(group, key=lambda rider: rider.get("submitted_at") or "")
+        winners.add(id(winner))
+        for rider in group:
+            if rider is winner:
+                continue
+            removed_email = normalize_email(rider.get("email"))
+            winner_email = normalize_email(winner.get("email"))
+            if removed_email and removed_email == winner_email:
+                matched_by = "email"
+            elif (
+                normalize_phone(rider.get("phone"))
+                and normalize_phone(rider.get("phone")) == normalize_phone(winner.get("phone"))
+            ):
+                matched_by = "phone"
+            else:
+                matched_by = "email/phone"
+            logger.warning(
+                "Removed duplicate signup: %r (matched by %s) - "
+                "kept most recent submission from %s",
+                rider.get("name"),
+                matched_by,
+                winner.get("submitted_at"),
+            )
+
+    deduped: list[dict] = []
+    for rider in riders:
+        email = normalize_email(rider.get("email"))
+        phone = normalize_phone(rider.get("phone"))
+        if (not email and not phone) or id(rider) in winners:
+            deduped.append(rider)
+    return deduped
 
 
 def _parse_timestamp(raw: str) -> datetime | None:
