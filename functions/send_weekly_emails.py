@@ -16,6 +16,7 @@ from functions.read_riders_sheet import (
     get_all_riders_for_sunday,
     get_next_sunday_date,
     get_rider_counts,
+    get_shuttle_capacities,
     get_stop_times_map,
     get_stop_to_shuttle_map,
 )
@@ -211,6 +212,11 @@ def send_saturday_update(sunday_date: str) -> dict:
     except Exception as exc:
         raise RuntimeError(f"Failed to read stop pickup times: {exc}") from exc
 
+    try:
+        shuttle_capacities = get_shuttle_capacities()
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read shuttle capacities: {exc}") from exc
+
     shuttle_riders = all_riders["shuttle_riders"]
     non_shuttle_riders = all_riders["non_shuttle_riders"]
 
@@ -221,11 +227,17 @@ def send_saturday_update(sunday_date: str) -> dict:
     over_capacity_shuttles = [
         shuttle_id
         for shuttle_id, shuttle_counts in counts.items()
-        if shuttle_counts["total"] > MAX_RIDERS_PER_SHUTTLE
+        if shuttle_counts["total"] > shuttle_capacities.get(shuttle_id, MAX_RIDERS_PER_SHUTTLE)
     ]
 
     body = _build_saturday_summary(
-        all_riders, counts, non_shuttle_riders, over_capacity_shuttles, routes, stop_times_map
+        all_riders,
+        counts,
+        non_shuttle_riders,
+        over_capacity_shuttles,
+        routes,
+        stop_times_map,
+        shuttle_capacities,
     )
 
     try:
@@ -917,6 +929,7 @@ def _build_saturday_summary(
     over_capacity_shuttles: list[str],
     routes: list[dict],
     stop_times_map: dict,
+    shuttle_capacities: dict,
 ) -> str:
     """Format the plain-text Saturday rider-count summary email body.
 
@@ -933,17 +946,21 @@ def _build_saturday_summary(
         counts: The dict returned by _build_shuttle_counts().
         non_shuttle_riders: Riders with shuttle_id None, each with
             "name" and "stop" (their typed Campus Address).
-        over_capacity_shuttles: shuttle_ids with more than
-            MAX_RIDERS_PER_SHUTTLE riders signed up. No separate alert
-            email is sent for these anymore - a note is added inline
-            under that shuttle's total instead, so the coordinator can
-            act without a hard stop on signups.
+        over_capacity_shuttles: shuttle_ids that have exceeded their
+            capacity (see shuttle_capacities). No separate alert email
+            is sent for these anymore - a note is added inline under
+            that shuttle's total instead, so the coordinator can act
+            without a hard stop on signups.
         routes: Route dicts from functions.read_sheets.get_routes(),
             used to build each shuttle's display header live instead of
             from a hardcoded lookup.
         stop_times_map: {stop_name: pickup_time} from
             functions.read_riders_sheet.get_stop_times_map(), used to
             sort each shuttle's stops in pickup-time order.
+        shuttle_capacities: {shuttle_id: capacity} from
+            functions.read_riders_sheet.get_shuttle_capacities(), used
+            to show each over-capacity shuttle's actual max in its
+            inline note instead of one flat number for every shuttle.
 
     Returns:
         str: The formatted email body.
@@ -974,9 +991,10 @@ def _build_saturday_summary(
         lines.append(f"{header_label}: {_rider_count_text(shuttle_counts['total'])}")
 
         if shuttle_id in over_capacity_shuttles:
+            capacity = shuttle_capacities.get(shuttle_id, MAX_RIDERS_PER_SHUTTLE)
             lines.append(
                 f"\u26a0\ufe0f NOTE: This shuttle is over capacity "
-                f"(max {MAX_RIDERS_PER_SHUTTLE} riders)."
+                f"(max {capacity} riders)."
             )
             lines.append("Coordinator action may be needed.")
 

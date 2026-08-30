@@ -19,6 +19,12 @@ logger = logging.getLogger(__name__)
 # Tab name within the settings.RIDER_SHEET_ID spreadsheet.
 FORM_RESPONSES_TAB = "Form Responses 1"
 
+# Tab name within the settings.SHEETS_ID (driver) spreadsheet - holds
+# each shuttle's vehicle info (make/model/year/color/capacity), one row
+# per attribute and one column per shuttle_id. See
+# get_shuttle_capacities() for the exact layout.
+SHUTTLES_TAB = "Shuttles"
+
 # Fixed column positions in the sheet (A=0, B=1, ... G=6). Column G
 # ("Driver") is intentionally not read here.
 _TIMESTAMP_COL = 0
@@ -42,10 +48,12 @@ _TIMESTAMP_FORMATS = (
 # Cached route data (from functions.read_sheets.get_routes()) and the
 # lookups derived from it. Populated lazily on first use so this module
 # only reads the "Routes" tab once per process, no matter how many times
-# get_stop_to_shuttle_map()/get_stop_times_map() are called.
+# get_stop_to_shuttle_map()/get_stop_times_map()/get_shuttle_capacities()
+# are called.
 _routes_cache: list[dict] | None = None
 _stop_to_shuttle_cache: dict[str, str] | None = None
 _stop_times_cache: dict[str, str] | None = None
+_shuttle_capacities_cache: dict[str, int] | None = None
 
 
 def _get_cached_routes() -> list[dict]:
@@ -127,6 +135,103 @@ def get_stop_times_map() -> dict:
         _stop_times_cache = stop_times
 
     return _stop_times_cache
+
+
+def get_shuttle_capacities() -> dict:
+    """Return a mapping of shuttle_id -> max rider capacity, read live from Sheets.
+
+    Lets different shuttles have different capacities (e.g. a smaller
+    van seating fewer riders than a full-size one) instead of the one
+    flat MAX_RIDERS_PER_SHUTTLE applied to every shuttle. Reads the
+    "Shuttles" tab in the driver spreadsheet (settings.SHEETS_ID) -
+    NOT the "Routes" tab, which has no capacity data. The "Shuttles"
+    tab is laid out with one row per vehicle attribute and one column
+    per shuttle, e.g.:
+
+        (blank)   shuttle_1   shuttle_2
+        Make      Ford        GMC
+        Model     Transit     Savana
+        Year      2023        2010
+        Color     Gray        Silver
+        Capacity  14          14
+
+    Row 1's header gives each column's shuttle_id, and the row whose
+    column A is "Capacity" gives that shuttle's max riders. Cached
+    after a successful read so repeated lookups within a session don't
+    re-read the sheet - a failed read isn't cached, so the next call
+    tries again rather than being stuck on an empty result forever.
+
+    Returns:
+        dict: {shuttle_id: capacity, ...} for every shuttle found in
+            the header row. A shuttle's capacity falls back to
+            MAX_RIDERS_PER_SHUTTLE if its own value is missing or
+            can't be parsed as an int, and the whole tab falls back to
+            an empty dict (so every shuttle relies on callers'
+            MAX_RIDERS_PER_SHUTTLE default) if it can't be read at all.
+    """
+    global _shuttle_capacities_cache
+
+    if _shuttle_capacities_cache is not None:
+        return _shuttle_capacities_cache
+
+    try:
+        service = get_sheet_client()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.SHEETS_ID, range=SHUTTLES_TAB)
+            .execute()
+        )
+        rows = result.get("values", [])
+    except Exception as exc:
+        logger.warning(
+            "Failed to read '%s' tab; falling back to MAX_RIDERS_PER_SHUTTLE "
+            "(%d) for every shuttle: %s",
+            SHUTTLES_TAB,
+            MAX_RIDERS_PER_SHUTTLE,
+            exc,
+        )
+        return {}
+
+    if not rows:
+        logger.warning("'%s' tab is empty; no shuttle capacities to read.", SHUTTLES_TAB)
+        return {}
+
+    header = rows[0]
+    capacity_row = next(
+        (row for row in rows[1:] if _cell(row, 0).lower() == "capacity"), None
+    )
+    if capacity_row is None:
+        logger.warning(
+            "No 'Capacity' row found in '%s' tab; falling back to "
+            "MAX_RIDERS_PER_SHUTTLE (%d) for every shuttle.",
+            SHUTTLES_TAB,
+            MAX_RIDERS_PER_SHUTTLE,
+        )
+        return {}
+
+    capacities: dict[str, int] = {}
+    for col_idx in range(1, len(header)):
+        shuttle_id = _cell(header, col_idx)
+        if not shuttle_id:
+            continue
+
+        capacity_raw = _cell(capacity_row, col_idx)
+        try:
+            capacities[shuttle_id] = int(capacity_raw)
+        except ValueError:
+            logger.warning(
+                "Missing/invalid capacity %r for shuttle_id=%r in '%s' tab; "
+                "falling back to MAX_RIDERS_PER_SHUTTLE (%d).",
+                capacity_raw,
+                shuttle_id,
+                SHUTTLES_TAB,
+                MAX_RIDERS_PER_SHUTTLE,
+            )
+            capacities[shuttle_id] = MAX_RIDERS_PER_SHUTTLE
+
+    _shuttle_capacities_cache = capacities
+    return _shuttle_capacities_cache
 
 
 def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -> list[dict]:
@@ -308,8 +413,10 @@ def is_shuttle_full(shuttle_id: str, sunday_date: str) -> bool:
         sunday_date: The Sunday date to check, in ISO "YYYY-MM-DD" format.
 
     Returns:
-        bool: True if that shuttle has MAX_RIDERS_PER_SHUTTLE (14) or
-            more riders signed up.
+        bool: True if that shuttle has reached or exceeded its capacity
+            (see get_shuttle_capacities() - MAX_RIDERS_PER_SHUTTLE (14)
+            unless the Routes sheet sets a different capacity for that
+            specific shuttle).
 
     Raises:
         RuntimeError: If reading rider counts fails, or shuttle_id isn't
@@ -330,7 +437,8 @@ def is_shuttle_full(shuttle_id: str, sunday_date: str) -> bool:
             f"{sorted(set(get_stop_to_shuttle_map().values()))}."
         )
 
-    return shuttle_counts["total"] >= MAX_RIDERS_PER_SHUTTLE
+    capacity = get_shuttle_capacities().get(shuttle_id, MAX_RIDERS_PER_SHUTTLE)
+    return shuttle_counts["total"] >= capacity
 
 
 def get_next_sunday_date() -> str:
