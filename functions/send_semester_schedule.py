@@ -76,32 +76,30 @@ def send_monday_schedule() -> dict:
 # Helpers
 # --------------------------------------------------------------------------
 def _find_last_week(schedule: list[dict]) -> dict | None:
-    """Find the SEMESTER_SCHEDULE entry representing "last week".
+    """Find the semester schedule entry representing "last week".
 
-    Prefers whichever entry is explicitly flagged "past": True (there
-    should normally be exactly one, updated by hand as Sundays pass -
-    if more than one is flagged, the latest of those is used). Falls
-    back to the most recent entry whose date is on or before today, in
-    case the "past" flags haven't been kept up to date.
+    Compares each entry's ISO date against today's calendar date and
+    returns the most recent Sunday that has already happened (or is
+    today). Does not use the stored "past" field - that flag is
+    easy to forget to update by hand, so last week is always derived
+    from the real date instead.
 
     Args:
         schedule: The full semester schedule, from
             db.firestore_client.get_semester_schedule().
 
     Returns:
-        dict or None: The "last week" entry, or None if schedule is
-            empty and no entry qualifies as having already happened.
+        dict or None: The most recent entry whose date is on or
+            before today, or None if no entry qualifies.
     """
-    flagged = [entry for entry in schedule if entry.get("past")]
-    if flagged:
-        return max(flagged, key=lambda entry: entry["date"])
-
     today_iso = date.today().isoformat()
-    past_entries = [entry for entry in schedule if entry["date"] <= today_iso]
-    if past_entries:
-        return max(past_entries, key=lambda entry: entry["date"])
+    past_or_today = [
+        entry for entry in schedule if entry.get("date", "") <= today_iso
+    ]
+    if not past_or_today:
+        return None
 
-    return None
+    return max(past_or_today, key=lambda entry: entry["date"])
 
 
 def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[dict]) -> str:
