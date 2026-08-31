@@ -58,6 +58,7 @@ def send_monday_schedule() -> dict:
             to=settings.OVERSEER_DRIVER_EMAIL,
             subject=f"CFC Shuttle Driver Schedule - Week of {_format_short_date(monday_date)}",
             body=body,
+            cc=f"{settings.OVERSEER_RIDE_EMAIL}, {settings.OVERSEER_RIDE_EMAIL_2}",
             bcc=settings.BCC_EMAIL,
         )
     except Exception as exc:
