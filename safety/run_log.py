@@ -46,7 +46,12 @@ def start_run(agent: str, trigger: str) -> str:
     """
     run_id = str(uuid.uuid4())
 
-    write_run_log(
+    write_run_log(python -c "
+from dotenv import load_dotenv
+load_dotenv()
+from functions.send_weekly_emails import preview_wednesday_reminder
+print(preview_wednesday_reminder('2026-08-30'))
+"
         run_id=run_id,
         agent=agent,
         status="started",
@@ -206,3 +211,4 @@ def check_saturday_run(sunday_date: str) -> bool:
             f"Failed to check saturday run status for "
             f"sunday_date={sunday_date!r}: {exc}"
         ) from exc
+1
