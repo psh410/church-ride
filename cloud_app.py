@@ -36,6 +36,87 @@ def health() -> tuple:
     return jsonify({"status": "ok"}), 200
 
 
+@app.route("/sms-terms", methods=["GET"])
+def sms_terms():
+    """Serve the SMS program terms and privacy policy page,
+    required for A2P 10DLC campaign compliance."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>CFC Ride Coordination - SMS Terms & Privacy Policy</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: -apple-system, sans-serif; 
+                   max-width: 700px; margin: 40px auto; 
+                   padding: 0 20px; line-height: 1.6; color: #333; }
+            h1 { font-size: 24px; }
+            h2 { font-size: 18px; margin-top: 30px; }
+            p { margin-bottom: 16px; }
+        </style>
+    </head>
+    <body>
+        <h1>Covenant Fellowship Church (CFC) - SMS Program Terms & Privacy Policy</h1>
+        
+        <p>Last updated: September 2026</p>
+
+        <h2>Program Description</h2>
+        <p>Covenant Fellowship Church's Ride Coordination Agent 
+        sends SMS text messages to volunteer drivers and riders 
+        who have opted in via our ride signup Google Form. 
+        Messages include Sunday shuttle assignments, pickup times 
+        and locations, rider lists, last-minute schedule changes, 
+        and related ride-coordination reminders.</p>
+
+        <h2>Who Receives Messages</h2>
+        <p>Messages are sent only to people who have voluntarily 
+        provided their mobile number and opted in through the CFC 
+        ride signup form or driver availability form. We do not 
+        send marketing or promotional texts.</p>
+
+        <h2>Message Frequency</h2>
+        <p>Message frequency varies. Typical volume is a few 
+        messages per week around Sunday service, and fewer in weeks 
+        with no shuttle activity. Message and data rates may apply.</p>
+
+        <h2>Opt-In</h2>
+        <p>You opt in by providing your mobile number on the CFC 
+        ride signup or driver form and agreeing to receive SMS 
+        updates related to church rides. Consent is not a condition 
+        of participating in church life or receiving a ride.</p>
+
+        <h2>Opt-Out</h2>
+        <p>You can cancel SMS messages at any time by texting 
+        <strong>STOP</strong>. After you send STOP, we will send 
+        a confirmation and you will no longer receive SMS messages 
+        from this program. You may opt back in by texting START 
+        or by signing up again on the form.</p>
+
+        <h2>Help</h2>
+        <p>For help, text <strong>HELP</strong> or email 
+        team@cfchome.org.</p>
+
+        <h2>Privacy Policy</h2>
+        <p>We use your mobile number only to send ride-coordination 
+        messages you opted into. We do not sell, rent, or share 
+        your phone number with third parties for their marketing. 
+        Carriers are not liable for delayed or undelivered messages.</p>
+        <p>Personal information collected for this program (name, 
+        phone number, and related ride details) is stored in Google 
+        Sheets and Google Cloud services used to run the Ride 
+        Coordination Agent, and is accessed only by church ride 
+        coordinators and the systems that send these messages.</p>
+
+        <h2>Contact</h2>
+        <p>Covenant Fellowship Church<br>
+        2906 Crossing Ct, Champaign, IL<br>
+        Email: team@cfchome.org</p>
+    </body>
+    </html>
+    """
+    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
 @app.route("/debug-settings", methods=["GET"])
 def debug_settings():
     """Temporary debug endpoint to check which settings loaded."""
@@ -331,6 +412,19 @@ def route_send_saturday_driver_assignment() -> tuple:
         return jsonify(result), 200
     except Exception as exc:
         logger.error("send_saturday_driver_assignment failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/send-thursday-prayer-reminder", methods=["POST"])
+def send_thursday_prayer_reminder_route():
+    """Send the Thursday night prayer meeting reminder to
+    this week's speaker and worship leader."""
+    try:
+        from functions.prayer.thursday import send_thursday_reminder
+        result = send_thursday_reminder()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error("Thursday prayer reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
