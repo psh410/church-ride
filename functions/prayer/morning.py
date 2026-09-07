@@ -75,6 +75,9 @@ Format
 6:35 Devotional
 6:45 Individual Prayer Time (transition into the day's theme)
 7:29 Closing Prayer
+
+---
+Sent by the CFC Ride Coordination Agent
 """
 
 _FALLBACK_NOTE = (
