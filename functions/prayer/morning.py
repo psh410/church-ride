@@ -1,11 +1,10 @@
 # Reads the Morning Prayer weekly schedule from Google Sheets
-# (devotional rotation + worship-leader directory) and sends an
-# HTML reminder to the coordinators via the same Gmail domain-wide
-# delegation path as functions/prayer/thursday.py.
+# (devotional rotation + worship-leader directory) and sends a
+# plain-text reminder to the coordinators via the same Gmail
+# domain-wide delegation path as functions/prayer/thursday.py.
 
 from __future__ import annotations
 
-import html
 import logging
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -65,59 +64,24 @@ _DAY_ABBREVIATIONS = {
 
 _BLANK_VALUES = {"", "—", "-", "–", "n/a", "na", "none"}
 
-_EMAIL_HTML = """<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-</head>
-<body style="font-family: Arial, sans-serif; line-height: 1.6; color: #333;">
-    <div style="max-width: 600px; margin: 0 auto; padding: 20px;">
-        <p style="font-size: 16px; margin-bottom: 20px;">Hi everyone,</p>
-        {error_note}
-        <p style="font-size: 16px; margin-bottom: 20px;">Thank you for serving in Morning Prayer next week. Here's the schedule:</p>
-        
-        <table style="width: 100%; border-collapse: collapse; margin-bottom: 30px;">
-            <thead>
-                <tr style="border-bottom: 2px solid #999;">
-                    <th style="text-align: left; padding: 12px 8px; font-weight: bold; font-size: 15px;">Day</th>
-                    <th style="text-align: left; padding: 12px 8px; font-weight: bold; font-size: 15px;">Devotional</th>
-                    <th style="text-align: left; padding: 12px 8px; font-weight: bold; font-size: 15px;">Worship</th>
-                    <th style="text-align: left; padding: 12px 8px; font-weight: bold; font-size: 15px;">Prayer Theme</th>
-                </tr>
-            </thead>
-            <tbody>
-                {schedule_rows}
-            </tbody>
-        </table>
-        
-        <h3 style="font-size: 16px; font-weight: bold; margin-bottom: 15px;">Format</h3>
-        <div style="margin-bottom: 12px;">
-            <span style="font-weight: bold; display: inline-block; width: 120px;">6:30</span>
-            <span>Worship</span>
-        </div>
-        <div style="margin-bottom: 12px;">
-            <span style="font-weight: bold; display: inline-block; width: 120px;">6:35</span>
-            <span>Devotional</span>
-        </div>
-        <div style="margin-bottom: 12px;">
-            <span style="font-weight: bold; display: inline-block; width: 120px;">6:45</span>
-            <span>Individual Prayer Time <span style="font-style: italic;">(transition into the day's theme)</span></span>
-        </div>
-        <div>
-            <span style="font-weight: bold; display: inline-block; width: 120px;">7:29</span>
-            <span>Closing Prayer</span>
-        </div>
-    </div>
-</body>
-</html>
+_EMAIL_TEXT = """Hi everyone,
+
+Thank you for serving in Morning Prayer next week. Here's the schedule:
+
+{schedule_table}
+
+Format
+
+6:30 Worship
+6:35 Devotional
+6:45 Individual Prayer Time (transition into the day's theme)
+7:29 Closing Prayer
 """
 
 _FALLBACK_NOTE = (
-    '<p style="font-size: 16px; margin-bottom: 20px; color: #b00020;">'
     "We could not fully load this week's schedule from the rotation "
     "sheets. Please check the Devotional and Worship spreadsheets and "
-    "forward the correct assignments if needed.</p>"
+    "forward the correct assignments if needed.\n\n"
 )
 
 
@@ -277,49 +241,37 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
     return schedule
 
 
-def build_morning_prayer_html(
+def build_morning_prayer_body(
     schedule_dict: dict,
     error_note: str | None = None,
 ) -> str:
-    """Return the complete HTML email body for a schedule dict.
+    """Return the complete plain-text email body for a schedule dict.
 
     Args:
         schedule_dict: Output of get_morning_prayer_schedule().
-        error_note: Optional HTML warning inserted after the greeting
+        error_note: Optional warning inserted after the greeting
             when sheet data could not be loaded.
 
     Returns:
-        str: Full HTML document with {schedule_rows} filled in.
+        str: Plain-text body with {schedule_table} filled in.
     """
-    rows: list[str] = []
-    for key, label in SCHEDULE_DAYS:
-        day = schedule_dict.get(key) or {}
-        rows.append(
-            _schedule_row_html(
-                label,
-                day.get("devotional"),
-                day.get("worship"),
-                day.get("theme") or PRAYER_THEMES[key],
-                bool(day.get("devotional_absent")),
-                bool(day.get("worship_absent")),
-            )
-        )
+    table = _schedule_table(schedule_dict)
+    body = _EMAIL_TEXT.replace("{schedule_table}", table)
 
-    note_html = error_note or ""
-    if not note_html and _schedule_is_empty(schedule_dict):
-        note_html = _FALLBACK_NOTE
-
-    return _EMAIL_HTML.replace("{error_note}", note_html).replace(
-        "{schedule_rows}", "\n                ".join(rows)
-    )
+    note = error_note or ""
+    if not note and _schedule_is_empty(schedule_dict):
+        note = _FALLBACK_NOTE
+    if note:
+        body = body.replace("Hi everyone,\n\n", f"Hi everyone,\n\n{note}")
+    return body
 
 
 def send_morning_prayer_email(now: datetime | None = None) -> None:
-    """Fetch the schedule, build the HTML body, and send to coordinators.
+    """Fetch the schedule, build the plain-text body, and send to coordinators.
 
     To: Josh and Peter. BCC: peterhahn@cfchome.org plus
     settings.BCC_EMAIL when it is a different address. Sheet failures
-    still send a fallback HTML message so coordinators know to look.
+    still send a fallback message so coordinators know to look.
 
     Args:
         now: Optional clock override for tests.
@@ -335,7 +287,7 @@ def send_morning_prayer_email(now: datetime | None = None) -> None:
         schedule = _empty_schedule()
         error_note = _FALLBACK_NOTE
 
-    body = build_morning_prayer_html(schedule, error_note=error_note)
+    body = build_morning_prayer_body(schedule, error_note=error_note)
     bcc_addresses = _bcc_addresses()
 
     sent = send_email(
@@ -343,7 +295,6 @@ def send_morning_prayer_email(now: datetime | None = None) -> None:
         subject=EMAIL_SUBJECT,
         body=body,
         bcc=", ".join(bcc_addresses) if bcc_addresses else None,
-        html=True,
     )
     if not sent:
         raise RuntimeError("Failed to send Morning Prayer email")
@@ -535,38 +486,33 @@ def _parse_worship_days(raw: str) -> list[str]:
     return days
 
 
-def _schedule_row_html(
-    day_label: str,
-    devotional: str | None,
-    worship: str | None,
-    theme: str,
-    devotional_absent: bool,
-    worship_absent: bool,
-) -> str:
-    cell = (
-        'style="text-align: left; padding: 12px 8px; '
-        'border-bottom: 1px solid #e5e5e5; font-size: 15px;"'
-    )
-    return (
-        f"<tr>"
-        f"<td {cell}>{html.escape(day_label)}</td>"
-        f"<td {cell}>{_render_name(devotional, devotional_absent)}</td>"
-        f"<td {cell}>{_render_name(worship, worship_absent)}</td>"
-        f"<td {cell}>{html.escape(theme)}</td>"
-        f"</tr>"
-    )
+def _schedule_table(schedule_dict: dict) -> str:
+    """Build a space-aligned plain-text schedule table."""
+    lines = [
+        f"{'Day':<11}{'Devotional':<17}{'Worship':<17}Prayer Theme",
+        f"{'------':<11}{'--------':<17}{'-------':<17}-----",
+    ]
+    for key, label in SCHEDULE_DAYS:
+        day = schedule_dict.get(key) or {}
+        devotional = _render_name(
+            day.get("devotional"),
+            bool(day.get("devotional_absent")),
+        )
+        worship = _render_name(
+            day.get("worship"),
+            bool(day.get("worship_absent")),
+        )
+        theme = day.get("theme") or PRAYER_THEMES[key]
+        lines.append(f"{label:<11}{devotional:<17}{worship:<17}{theme}")
+    return "\n".join(lines)
 
 
 def _render_name(name: str | None, is_absent: bool) -> str:
     if not name:
         return "—"
-    escaped = html.escape(name)
-    if not is_absent:
-        return escaped
-    return (
-        f'<s>{escaped}</s> '
-        f'<span style="color: #b00020;">(absent)</span>'
-    )
+    if is_absent:
+        return f"{name} (absent)"
+    return name
 
 
 def _clean_name(value: str | None) -> str | None:
