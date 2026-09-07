@@ -77,7 +77,7 @@ Format
 7:29 Closing Prayer
 
 ---
-Sent by the CFC Ride Coordination Agent
+Sent by the CFC Coordination Agent
 """
 
 _FALLBACK_NOTE = (
