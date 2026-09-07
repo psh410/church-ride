@@ -1,6 +1,6 @@
 # Reads the Morning Prayer weekly schedule from Google Sheets
 # (devotional rotation + worship-leader directory) and sends a
-# plain-text reminder to the coordinators via the same Gmail
+# plain-text reminder to that week's servants via the same Gmail
 # domain-wide delegation path as functions/prayer/thursday.py.
 
 from __future__ import annotations
@@ -30,7 +30,6 @@ WORSHIP_TAB_FALLBACK = "2025-2026"
 # Thursday prayer sheet - same Servants tab thursday.py uses.
 PRAYER_SHEET_ID = "1Vs26gjZdwhyMlYjVGQ7HUG8bFlLf-SZaDBrkq76o5cs"
 
-COORDINATOR_TO = ["joshmkim0@gmail.com", "peterhahn@cfchome.org"]
 ALWAYS_BCC = "peterhahn@cfchome.org"
 
 EMAIL_SUBJECT = "Morning Prayer Schedule for Next Week"
@@ -266,12 +265,70 @@ def build_morning_prayer_body(
     return body
 
 
-def send_morning_prayer_email(now: datetime | None = None) -> None:
-    """Fetch the schedule, build the plain-text body, and send to coordinators.
+def get_roster_emails() -> dict[str, str]:
+    """Return a name-to-email map from the Devotional Servants tab.
 
-    To: Josh and Peter. BCC: peterhahn@cfchome.org plus
-    settings.BCC_EMAIL when it is a different address. Sheet failures
-    still send a fallback message so coordinators know to look.
+    Reads DEVOTIONAL_SHEET_ID Servants!A:C. Column A is the name,
+    B is the phone, C is the email. Row 0 is a coordinator label
+    (not a roster header); rows without both a name and an email
+    are skipped.
+
+    Returns:
+        dict[str, str]: {name: email, ...}.
+
+    Raises:
+        RuntimeError: If the Servants tab can't be read.
+    """
+    rows = get_sheet_range(DEVOTIONAL_SHEET_ID, f"{SERVANTS_TAB}!A:C")
+    roster: dict[str, str] = {}
+    for row in rows[1:]:
+        name = _cell(row, 0)
+        email = _cell(row, 2)
+        if not name or not email or "@" not in email:
+            continue
+        if "coordinator" in name.lower():
+            continue
+        roster[name] = email
+    return roster
+
+
+def get_recipients_for_week(schedule_dict: dict, roster: dict[str, str]) -> list[str]:
+    """Return sorted unique emails for this week's devotional and worship leaders.
+
+    Looks up each day's names in the roster with an exact match first,
+    then a first-name match so "Ryan Bielak" resolves to "Ryan" and
+    "Dae-Woung" resolves to "Dae". Names with no match are logged.
+
+    Args:
+        schedule_dict: Output of get_morning_prayer_schedule().
+        roster: Output of get_roster_emails().
+
+    Returns:
+        list[str]: Unique recipient emails, sorted.
+    """
+    emails: set[str] = set()
+    for key, _label in SCHEDULE_DAYS:
+        day = schedule_dict.get(key) or {}
+        for name in (day.get("devotional"), day.get("worship")):
+            if not name:
+                continue
+            email = _lookup_roster_email(name, roster)
+            if email:
+                emails.add(email)
+            else:
+                logger.warning(
+                    "No roster email for Morning Prayer name=%r.", name
+                )
+    return sorted(emails)
+
+
+def send_morning_prayer_email(now: datetime | None = None) -> None:
+    """Fetch the schedule, build the plain-text body, and send to servants.
+
+    To: every unique devotional and worship leader serving that week.
+    BCC: peterhahn@cfchome.org plus settings.BCC_EMAIL when it is a
+    different address. Sheet failures still send a fallback message
+    so someone on BCC knows to look.
 
     Args:
         now: Optional clock override for tests.
@@ -287,11 +344,22 @@ def send_morning_prayer_email(now: datetime | None = None) -> None:
         schedule = _empty_schedule()
         error_note = _FALLBACK_NOTE
 
+    try:
+        roster = get_roster_emails()
+        recipients = get_recipients_for_week(schedule, roster)
+    except Exception as exc:
+        logger.error("Failed to resolve Morning Prayer recipients: %s", exc)
+        return
+
+    if not recipients:
+        logger.warning("No Morning Prayer recipients for this week; not sending.")
+        return
+
     body = build_morning_prayer_body(schedule, error_note=error_note)
     bcc_addresses = _bcc_addresses()
 
     sent = send_email(
-        to=", ".join(COORDINATOR_TO),
+        to=", ".join(recipients),
         subject=EMAIL_SUBJECT,
         body=body,
         bcc=", ".join(bcc_addresses) if bcc_addresses else None,
@@ -470,6 +538,24 @@ def _name_is_absent(name: str | None, absences: set[str]) -> bool:
         if _name_tokens(name) & _name_tokens(absent):
             return True
     return False
+
+
+def _lookup_roster_email(name: str, roster: dict[str, str]) -> str | None:
+    """Resolve a schedule name to a Servants-tab email.
+
+    Exact (case-insensitive) match first, then a first-name / token
+    match in either direction.
+    """
+    if not name:
+        return None
+    for roster_name, email in roster.items():
+        if roster_name.lower() == name.lower():
+            return email
+    name_tokens = _name_tokens(name)
+    for roster_name, email in roster.items():
+        if name_tokens & _name_tokens(roster_name):
+            return email
+    return None
 
 
 def _name_tokens(name: str) -> set[str]:
