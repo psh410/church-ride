@@ -536,8 +536,11 @@ def _build_wednesday_reminder_body(
                 lines.append(f"     {map_url}")
             lines.append("")
 
-        departure_time = route.get("departure_time", "")
-        lines.append(f"\U0001f504 Return departure from church: {departure_time}")
+        # The return time is not fixed week to week - it's announced at
+        # church - so don't print the Routes tab's departure_time as if
+        # it were settled. A driver planning around a stated 11:30 would
+        # be planning around a guess.
+        lines.append("\U0001f504 Return time: announced at church")
         lines.append(_SECTION_DIVIDER)
         lines.append("")
 
@@ -622,9 +625,10 @@ def _build_saturday_driver_assignment_body(
         all_riders: The dict returned by get_all_riders_for_sunday(),
             used here for its "shuttle_riders" list.
         routes: Route dicts from functions.read_sheets.get_routes(),
-            used to build each shuttle's name, van, full stop list, and
-            return departure_time live instead of from a hardcoded
-            lookup.
+            used to build each shuttle's name, van, and full stop list.
+            The Routes tab's departure_time is deliberately ignored -
+            the return time varies week to week and is announced at
+            church.
         stop_times_map: {stop_name: pickup_time} from
             functions.read_riders_sheet.get_stop_times_map(), used to
             sort each shuttle's stops in pickup-time order.
@@ -660,7 +664,6 @@ def _build_saturday_driver_assignment_body(
 
         if route:
             van = route.get("van", "van TBD")
-            return_time = route.get("departure_time") or "time TBD"
             # Every stop this shuttle serves, regardless of whether
             # anyone signed up for it this week - straight from Sheets.
             stops = sorted(
@@ -669,7 +672,6 @@ def _build_saturday_driver_assignment_body(
             )
         else:
             van = "van TBD"
-            return_time = "time TBD"
             stops = []
 
         shuttle_number = shuttle_id[-1] if shuttle_id else "?"
@@ -699,7 +701,9 @@ def _build_saturday_driver_assignment_body(
                 lines.append("      No riders")
             lines.append("")
 
-        lines.append(f"\U0001f504 Return departure from church: {return_time}")
+        # See the note in the Wednesday reminder: the return time is
+        # announced at church, not set in the Routes tab.
+        lines.append("\U0001f504 Return time: announced at church")
         lines.append(_SECTION_DIVIDER)
         lines.append("")
 

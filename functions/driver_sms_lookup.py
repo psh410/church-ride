@@ -126,12 +126,14 @@ def _build_route_reply(
         lines.append("No stops listed for this shuttle.")
         return "\n".join(lines)
 
-    # The return leg carries whoever is heading back, so per-stop rider
-    # counts would be misleading - the pickup list isn't the return list.
+    # The return leg has no set stops and no set rider list: whoever is
+    # heading back gets on, and the departure time is announced at
+    # church rather than fixed in the Routes tab. So list nothing and
+    # say so, rather than repeating the morning pickup stops and times
+    # as though they applied.
     if leg == "return":
-        for stop in stops:
-            lines.append(f"{_stop_name(stop)} {_strip_ampm(stop.get('pickup_time'))}".strip())
-        lines.append("No set rider list for the return")
+        lines.append("No set stops or rider list.")
+        lines.append("Return time announced at church.")
         return "\n".join(lines)
 
     counts = _rider_counts_by_stop(shuttle_id, sunday_date)

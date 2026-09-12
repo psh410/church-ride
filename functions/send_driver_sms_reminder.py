@@ -170,9 +170,12 @@ def _remind_shuttle(
             return_name,
             drivers,
             (
+                # No stops and no 8:30 for the return leg: it has no set
+                # stop list, and a return driver isn't doing the morning
+                # pickups. The return time is announced at church.
                 f"{BRAND_PREFIX} Hi {_first_name(return_name or '')}, reminder "
                 f"you're driving the {label} RETURN leg only this Sunday. "
-                f"Stops: {stops}. Be at church by 8:30 AM. {DRIVER_CLOSING_NOTICE}"
+                f"Return time will be announced at church. {DRIVER_CLOSING_NOTICE}"
             ),
         )
         result["return"] = {"name": return_name, **return_result}
