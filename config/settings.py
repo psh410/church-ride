@@ -135,6 +135,16 @@ OVERSEER_EMAILS = [
 
 DISCORD_BOT_TOKEN = _get_secret("DISCORD_BOT_TOKEN")
 
+# Twilio credentials for functions/send_sms.py. TWILIO_MESSAGING_SERVICE_SID
+# is the "CFC Communications" Messaging Service (not the old, retired
+# service) - see twilio-a2p-campaign-plan.md in the Ride App Claude
+# project for the current SID and campaign approval status. None of
+# these are in _REQUIRED_SETTINGS below since SMS sending is optional
+# until the A2P 10DLC campaign is approved.
+TWILIO_ACCOUNT_SID = _get_secret("TWILIO_ACCOUNT_SID")
+TWILIO_AUTH_TOKEN = _get_secret("TWILIO_AUTH_TOKEN")
+TWILIO_MESSAGING_SERVICE_SID = _get_secret("TWILIO_MESSAGING_SERVICE_SID")
+
 # --------------------------------------------------------------------------
 # Validation
 # --------------------------------------------------------------------------

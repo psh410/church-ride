@@ -56,65 +56,138 @@ def sms_terms():
         </style>
     </head>
     <body>
-        <h1>Covenant Fellowship Church (CFC) - SMS Program Terms & Privacy Policy</h1>
-        
+        <h1>Covenant Fellowship Church (CFC) - SMS Program Terms</h1>
+
         <p>Last updated: September 2026</p>
 
         <h2>Program Description</h2>
-        <p>Covenant Fellowship Church's Ride Coordination Agent 
-        sends SMS text messages to volunteer drivers and riders 
-        who have opted in via our ride signup Google Form. 
-        Messages include Sunday shuttle assignments, pickup times 
-        and locations, rider lists, last-minute schedule changes, 
-        and related ride-coordination reminders.</p>
+        <p>By opting in, you agree to receive SMS ride notifications 
+        and reminders from Covenant Fellowship Church (CFC), 
+        including pickup confirmations, ride cancellations, driver 
+        assignment reminders, and pickup/dropoff status updates.</p>
 
         <h2>Who Receives Messages</h2>
         <p>Messages are sent only to people who have voluntarily 
         provided their mobile number and opted in through the CFC 
-        ride signup form or driver availability form. We do not 
-        send marketing or promotional texts.</p>
-
-        <h2>Message Frequency</h2>
-        <p>Message frequency varies. Typical volume is a few 
-        messages per week around Sunday service, and fewer in weeks 
-        with no shuttle activity. Message and data rates may apply.</p>
+        ride signup form or driver availability form.</p>
 
         <h2>Opt-In</h2>
         <p>You opt in by providing your mobile number on the CFC 
-        ride signup or driver form and agreeing to receive SMS 
-        updates related to church rides. Consent is not a condition 
-        of participating in church life or receiving a ride.</p>
+        ride signup or driver form at 
+        <a href="https://forms.gle/hszPoGWTaLr4t3U69">
+        https://forms.gle/hszPoGWTaLr4t3U69</a> and agreeing to 
+        receive SMS updates related to church rides.</p>
+
+        <h2>Message Frequency</h2>
+        <p>Message frequency varies, but you may receive up to 3 
+        messages per week during active shuttle service periods. 
+        Message and data rates may apply.</p>
 
         <h2>Opt-Out</h2>
-        <p>You can cancel SMS messages at any time by texting 
-        <strong>STOP</strong>. After you send STOP, we will send 
-        a confirmation and you will no longer receive SMS messages 
-        from this program. You may opt back in by texting START 
-        or by signing up again on the form.</p>
+        <p>You can opt out at any time by replying STOP to any 
+        message. You will receive a confirmation and will no longer 
+        receive messages from this program.</p>
 
         <h2>Help</h2>
-        <p>For help, text <strong>HELP</strong> or email 
-        team@cfchome.org.</p>
+        <p>For help, reply HELP to any message, or contact us at 
+        <a href="mailto:team@cfchome.org">team@cfchome.org</a>.</p>
 
-        <h2>Privacy Policy</h2>
-        <p>We use your mobile number only to send ride-coordination 
-        messages you opted into. We do not sell, rent, or share 
-        your phone number with third parties for their marketing. 
-        Carriers are not liable for delayed or undelivered messages.</p>
-        <p>Personal information collected for this program (name, 
-        phone number, and related ride details) is stored in Google 
-        Sheets and Google Cloud services used to run the Ride 
-        Coordination Agent, and is accessed only by church ride 
-        coordinators and the systems that send these messages.</p>
+        <h2>Privacy</h2>
+        <p>See our 
+        <a href="/privacy-policy">Privacy Policy</a> 
+        for information on how we handle and protect your data.</p>
 
-        <h2>Contact</h2>
+        <h2>Contact Us</h2>
         <p>Covenant Fellowship Church<br>
         2906 Crossing Ct, Champaign, IL<br>
-        Email: team@cfchome.org</p>
+        Email: <a href="mailto:team@cfchome.org">team@cfchome.org</a></p>
     </body>
     </html>
     """
     return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+
+
+@app.route("/privacy-policy", methods=["GET"])
+def privacy_policy():
+    """Serve the dedicated Privacy Policy page, separate
+    from SMS terms, for A2P 10DLC campaign compliance
+    (reviewers require two distinct URLs)."""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Covenant Fellowship Church - Privacy Policy</title>
+        <meta name="viewport" content="width=device-width, initial-scale=1">
+        <style>
+            body { font-family: -apple-system, sans-serif; 
+                   max-width: 700px; margin: 40px auto; 
+                   padding: 0 20px; line-height: 1.6; color: #333; }
+            h1 { font-size: 24px; }
+            h2 { font-size: 18px; margin-top: 30px; }
+            p { margin-bottom: 16px; }
+        </style>
+    </head>
+    <body>
+        <h1>Covenant Fellowship Church (CFC) - Privacy Policy</h1>
+        
+        <p>Last updated: September 2026</p>
+
+        <h2>What Information We Collect</h2>
+        <p>Covenant Fellowship Church's Ride Coordination 
+        program collects your name, phone number, and email 
+        address when you voluntarily submit our ride signup 
+        or driver availability Google Form.</p>
+
+        <h2>How We Use Your Information</h2>
+        <p>We use your phone number solely to send SMS 
+        messages related to ride coordination, including 
+        pickup confirmations, ride cancellations, driver 
+        assignment reminders, and pickup/dropoff status 
+        updates. We do not use your information for 
+        marketing purposes.</p>
+
+        <h2>Message Frequency and Rates</h2>
+        <p>Message frequency varies, but you may receive up 
+        to 3 messages per week during active shuttle service 
+        periods. Message and data rates may apply.</p>
+
+        <h2>Data Sharing</h2>
+        <p>Your phone number and personal information will 
+        never be sold, rented, or shared with third parties 
+        for their marketing purposes. You will not receive 
+        third-party marketing messages through this program.</p>
+
+        <h2>Where Your Data Is Stored</h2>
+        <p>Your information is stored securely in Google 
+        Sheets and Google Cloud services used to operate the 
+        Ride Coordination Agent, and is accessed only by 
+        church ride coordinators and the automated systems 
+        that send these messages.</p>
+
+        <h2>Opting Out</h2>
+        <p>You can opt out of SMS messages at any time by 
+        replying STOP to any message. You will receive a 
+        confirmation and will no longer receive messages 
+        from this program. You may opt back in by texting 
+        START or by signing up again on our form.</p>
+
+        <h2>Getting Help</h2>
+        <p>For help, reply HELP to any message, or contact 
+        us directly at 
+        <a href="mailto:team@cfchome.org">team@cfchome.org</a>.</p>
+
+        <h2>Contact Us</h2>
+        <p>Covenant Fellowship Church<br>
+        2906 Crossing Ct, Champaign, IL<br>
+        Email: 
+        <a href="mailto:team@cfchome.org">team@cfchome.org</a></p>
+
+        <p><a href="/sms-terms">View SMS Program Terms</a></p>
+
+    </body>
+    </html>
+    """
+    return html, 200, {"Content-Type": "text/html"}
 
 
 @app.route("/debug-settings", methods=["GET"])
@@ -425,6 +498,19 @@ def send_thursday_prayer_reminder_route():
         return jsonify(result), 200
     except Exception as exc:
         logger.error("Thursday prayer reminder failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/send-morning-prayer-reminder", methods=["POST"])
+def send_morning_prayer_reminder_route():
+    """Send the Morning Prayer weekly reminder combining
+    devotional and worship schedules."""
+    try:
+        from functions.prayer.morning import send_morning_reminder
+        result = send_morning_reminder()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error("Morning prayer reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 

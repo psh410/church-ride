@@ -34,8 +34,9 @@ def send_email(
     body: str,
     cc: str | None = None,
     bcc: str | None = None,
+    html: bool = False,
 ) -> bool:
-    """Send a plain-text email via the Gmail API with domain-wide delegation.
+    """Send an email via the Gmail API with domain-wide delegation.
 
     Loads credentials one of two ways, depending on the environment:
     - Local development: if settings.GOOGLE_APPLICATION_CREDENTIALS
@@ -62,7 +63,7 @@ def send_email(
     Args:
         to: Recipient email address.
         subject: Email subject line.
-        body: Plain-text email body.
+        body: Email body. Treated as plain text unless html=True.
         cc: Optional CC address (or comma-separated addresses). Added as
             a visible "Cc" header.
         bcc: Optional BCC address (or comma-separated addresses). Added
@@ -70,6 +71,7 @@ def send_email(
             strips this header from the delivered mail seen by To/Cc
             recipients, but still delivers a copy to every address
             listed here, so it stays invisible to everyone else.
+        html: If True, send body as text/html; otherwise text/plain.
 
     Returns:
         bool: True if the email was sent successfully, False otherwise.
@@ -121,7 +123,7 @@ def send_email(
             message["Cc"] = cc
         if bcc:
             message["Bcc"] = bcc
-        message.attach(MIMEText(body, "plain"))
+        message.attach(MIMEText(body, "html" if html else "plain"))
 
         raw_message = base64.urlsafe_b64encode(message.as_bytes()).decode("utf-8")
 
