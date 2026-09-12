@@ -9,7 +9,12 @@ from datetime import datetime
 from db.firestore_client import get_semester_schedule, is_phone_opted_out
 from functions.read_riders_sheet import get_next_sunday_date
 from functions.read_sheets import get_all_drivers_with_history, get_routes
-from functions.send_sms import normalize_to_e164, send_sms
+from functions.send_sms import (
+    BRAND_PREFIX,
+    OPT_OUT_NOTICE,
+    normalize_to_e164,
+    send_sms,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -139,9 +144,9 @@ def _remind_shuttle(
         pickup_name,
         drivers,
         (
-            f"CFC: Hi {_first_name(pickup_name or '')}, reminder you're driving "
-            f"{label} this Sunday. Stops: {stops}. Be at church by "
-            f"8:30 AM. Reply HELP for support, STOP to opt out."
+            f"{BRAND_PREFIX} Hi {_first_name(pickup_name or '')}, reminder "
+            f"you're driving {label} this Sunday. Stops: {stops}. Be at "
+            f"church by 8:30 AM. {OPT_OUT_NOTICE}"
         ),
     )
 
@@ -160,9 +165,9 @@ def _remind_shuttle(
             return_name,
             drivers,
             (
-                f"CFC: Hi {_first_name(return_name or '')}, reminder you're driving "
-                f"the {label} RETURN leg only this Sunday. Stops: {stops}. "
-                f"Be at church by 8:30 AM. Reply HELP for support, STOP to opt out."
+                f"{BRAND_PREFIX} Hi {_first_name(return_name or '')}, reminder "
+                f"you're driving the {label} RETURN leg only this Sunday. "
+                f"Stops: {stops}. Be at church by 8:30 AM. {OPT_OUT_NOTICE}"
             ),
         )
         result["return"] = {"name": return_name, **return_result}
@@ -184,9 +189,9 @@ def _remind_backup(entry: dict, drivers: list[dict]) -> dict | str:
         backup_name,
         drivers,
         (
-            f"CFC: Hi {_first_name(backup_name)}, you're the BACKUP driver "
-            f"this Sunday in case Shuttle 1 or Shuttle 2 needs "
-            f"coverage. Be at church by 8:30 AM. Reply HELP for support, STOP to opt out."
+            f"{BRAND_PREFIX} Hi {_first_name(backup_name)}, you're the BACKUP "
+            f"driver this Sunday in case Shuttle 1 or Shuttle 2 needs "
+            f"coverage. Be at church by 8:30 AM. {OPT_OUT_NOTICE}"
         ),
     )
     return {"name": backup_name, **send_result}

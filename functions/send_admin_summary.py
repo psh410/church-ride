@@ -24,7 +24,7 @@ from functions.read_riders_sheet import (
     get_riders_for_sunday,
     get_stop_to_shuttle_map,
 )
-from functions.send_sms import normalize_to_e164
+from functions.send_sms import BRAND_PREFIX, OPT_OUT_NOTICE, normalize_to_e164
 
 logger = logging.getLogger(__name__)
 
@@ -73,11 +73,12 @@ def build_admin_summary(sunday_date: str | None = None) -> str:
 
     Produces something like:
 
-        For Sunday service 9/13/26, 50 riders requested.
+        CFC Rides: For Sunday service 9/13/26, 50 riders requested.
         Shuttle 1 (Sangwoo): 10
         Shuttle 2 (Peter): 8
         Backup driver: Youngwook
         Non-shuttle requests: 32
+        Reply HELP for help, STOP to opt out.
 
     Shuttles are listed dynamically from the Routes tab, so adding a
     third shuttle makes it appear here without a code change. Rider
@@ -119,7 +120,7 @@ def build_admin_summary(sunday_date: str | None = None) -> str:
     entry = _get_schedule_entry(sunday_date)
 
     lines = [
-        f"For Sunday service {_format_short_date(sunday_date)}, "
+        f"{BRAND_PREFIX} For Sunday service {_format_short_date(sunday_date)}, "
         f"{len(riders)} riders requested."
     ]
     for shuttle_id, total in shuttle_totals.items():
@@ -127,6 +128,7 @@ def build_admin_summary(sunday_date: str | None = None) -> str:
         lines.append(f"{_shuttle_label(shuttle_id)} ({driver}): {total}")
     lines.append(f"Backup driver: {_backup_label(entry)}")
     lines.append(f"Non-shuttle requests: {non_shuttle_total}")
+    lines.append(OPT_OUT_NOTICE)
 
     return "\n".join(lines)
 

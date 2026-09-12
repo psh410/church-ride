@@ -23,6 +23,25 @@ logger = logging.getLogger(__name__)
 # below - kept as a constant so it's defined in exactly one place.
 _SUPPORT_EMAIL = "team@cfchome.org"
 
+# Every outbound message starts with BRAND_PREFIX and ends with
+# OPT_OUT_NOTICE, so recipients always know who is texting them and how
+# to stop. These live here, in the one module every sender imports, so
+# the wording can't drift between rider confirmations, driver reminders
+# and the admin summary (it already had, three different ways, before
+# these existed).
+#
+# "CFC Rides" deliberately matches the sample messages registered with
+# the approved A2P 10DLC campaign - copy that drifts from the registered
+# samples is a carrier-filtering risk.
+#
+# On the opt-out notice: Twilio's messaging policy requires opt-out
+# language in the INITIAL message to a recipient and treats periodic
+# reminders after that as best practice rather than a hard rule. We
+# include it on every message anyway, since it's simpler to guarantee
+# than tracking who has already been told.
+BRAND_PREFIX = "CFC Rides:"
+OPT_OUT_NOTICE = "Reply HELP for help, STOP to opt out."
+
 
 def normalize_to_e164(phone: str) -> str:
     """Normalize a messy US phone number to E.164 (+1XXXXXXXXXX).
@@ -189,8 +208,13 @@ def send_sms_batch(recipients: list[dict]) -> dict:
 
 
 # --------------------------------------------------------------------------
-# Message-type helpers - bodies match the approved campaign sample
-# messages. Prefer these over hand-writing new SMS copy.
+# Message-type helpers - bodies reproduce the sample messages registered
+# with the A2P campaign, word for word. Nothing calls these right now;
+# the live senders (send_rider_confirmation.py,
+# send_driver_sms_reminder.py, send_admin_summary.py) build their own
+# bodies from BRAND_PREFIX + OPT_OUT_NOTICE above. Leave the wording
+# here alone: it's a record of what was registered, not general-purpose
+# copy to edit.
 # --------------------------------------------------------------------------
 def send_ride_confirmation(
     phone: str,

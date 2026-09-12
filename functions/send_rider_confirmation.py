@@ -6,7 +6,7 @@ import logging
 
 from functions.read_riders_sheet import get_stop_to_shuttle_map
 from functions.read_sheets import get_routes
-from functions.send_sms import send_sms
+from functions.send_sms import BRAND_PREFIX, OPT_OUT_NOTICE, send_sms
 
 logger = logging.getLogger(__name__)
 
@@ -48,8 +48,8 @@ def send_rider_confirmation(name: str, phone: str, stop: str) -> dict:
 
         first_name = (name or "").strip().split()[0] if (name or "").strip() else "there"
         message = (
-            f"CFC: Hi {first_name}, you're confirmed for pickup at {stop_name} "
-            f"at {pickup_time} this Sunday. Reply STOP to opt out."
+            f"{BRAND_PREFIX} Hi {first_name}, you're confirmed for pickup at "
+            f"{stop_name} at {pickup_time} this Sunday. {OPT_OUT_NOTICE}"
         )
 
         sent = send_sms(phone, message)
