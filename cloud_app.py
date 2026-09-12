@@ -199,6 +199,11 @@ def debug_settings():
         "RIDER_SHEET_ID": settings.RIDER_SHEET_ID,
         "SHEETS_ID": settings.SHEETS_ID,
         "ADMIN_EMAIL": settings.ADMIN_EMAIL,
+        # Count only, never the numbers themselves - this endpoint is
+        # public. 0 here means ADMIN_SMS_PHONES didn't load, which is
+        # the silent failure that makes the UPDATE keyword ignore
+        # everyone (see functions/send_admin_summary.py).
+        "ADMIN_SMS_PHONES_count": len(settings.ADMIN_SMS_PHONES),
     })
 
 
