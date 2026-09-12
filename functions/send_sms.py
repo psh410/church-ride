@@ -15,6 +15,7 @@ from twilio.base.exceptions import TwilioRestException
 from twilio.rest import Client
 
 from config import settings
+from db.firestore_client import is_phone_opted_out
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,27 @@ def send_sms(to: str, body: str) -> bool:
     except ValueError as exc:
         logger.error("Cannot send SMS: %s", exc)
         return False
+
+    # Twilio already blocks delivery to a number that has opted out at
+    # the carrier level, but checking our own record first means we
+    # don't waste an API call/log a confusing Twilio-side failure, and
+    # callers (e.g. send_driver_sms_reminder.py) see a clear "opted
+    # out" reason instead of a generic send failure. If the check
+    # itself fails (e.g. Firestore hiccup), fail open and attempt the
+    # send anyway - Twilio's own opt-out enforcement is the real
+    # safety net here, not this lookup.
+    try:
+        if is_phone_opted_out(normalized):
+            logger.warning(
+                "Skipping SMS to %s: this number has opted out.", normalized
+            )
+            return False
+    except RuntimeError as exc:
+        logger.error(
+            "Could not check opt-out status for %s (%s); sending anyway.",
+            normalized,
+            exc,
+        )
 
     if not settings.TWILIO_ACCOUNT_SID or not settings.TWILIO_AUTH_TOKEN:
         logger.error(

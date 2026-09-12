@@ -488,6 +488,19 @@ def route_send_saturday_driver_assignment() -> tuple:
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@app.route("/send-driver-sms-reminder", methods=["POST"])
+def send_driver_sms_reminder_route():
+    """Send SMS reminders to this Sunday's shuttle drivers
+    and backup."""
+    try:
+        from functions.send_driver_sms_reminder import send_driver_sms_reminders
+        result = send_driver_sms_reminders()
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error("Driver SMS reminder failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/send-thursday-prayer-reminder", methods=["POST"])
 def send_thursday_prayer_reminder_route():
     """Send the Thursday night prayer meeting reminder to
@@ -512,6 +525,101 @@ def send_morning_prayer_reminder_route():
     except Exception as exc:
         logger.error("Morning prayer reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/sms-webhook", methods=["POST"])
+def sms_webhook():
+    """Receive incoming SMS events from Twilio, watching for opt-out
+    (STOP/CANCEL/etc) and opt-in (START/YES) keywords.
+
+    Twilio already blocks/unblocks carrier-level delivery on these
+    keywords automatically - this endpoint additionally records each
+    phone's status in Firestore (db.firestore_client.record_sms_opt_out
+    / record_sms_opt_in) so our own scheduled sends (functions/send_sms.py)
+    skip an opted-out number instead of attempting a send, and emails
+    the admin when a DRIVER opts out, since that needs a human to
+    arrange shift coverage (a rider opting out just stops their own
+    ride texts, no action needed).
+    """
+    try:
+        from flask import request
+
+        # Twilio sends form-encoded data, not JSON
+        from_number = request.form.get("From", "unknown")
+        body = request.form.get("Body", "").strip().upper()
+
+        opt_out_keywords = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
+        opt_in_keywords = {"START", "YES"}
+
+        if body in opt_out_keywords or body in opt_in_keywords:
+            from functions.send_sms import normalize_to_e164
+
+            try:
+                normalized = normalize_to_e164(from_number)
+            except ValueError:
+                normalized = from_number
+
+            driver = None
+            try:
+                from functions.read_sheets import find_driver_by_phone
+                driver = find_driver_by_phone(normalized)
+            except Exception:
+                logger.warning(
+                    "Could not check driver roster for %s.",
+                    normalized,
+                    exc_info=True,
+                )
+
+        if body in opt_out_keywords:
+            from db.firestore_client import record_sms_opt_out
+            record_sms_opt_out(normalized, body)
+
+            logger.warning(
+                "SMS opt-out received from %s (keyword: %s)%s",
+                normalized,
+                body,
+                f" - matches driver {driver['name']}" if driver else "",
+            )
+
+            if driver:
+                from functions.send_email import send_email
+                from config import settings
+
+                send_email(
+                    to=settings.BCC_EMAIL,
+                    subject=f"SMS Opt-Out Alert: driver {driver['name']}",
+                    body=(
+                        f"Driver {driver['name']} ({normalized}) has opted out "
+                        f"of SMS messages (replied {body}).\n\n"
+                        "They're now recorded as opted-out, so future automated "
+                        "SMS reminders (Friday driver reminders, etc.) will skip "
+                        "them automatically instead of texting them. You'll want "
+                        "to find a replacement for any shifts they're already "
+                        "assigned to, or reach them directly by phone/email to "
+                        "confirm their plans."
+                    ),
+                )
+            # A rider (or any unrecognized number) opting out needs no
+            # admin email - it's already recorded above, and it just
+            # means that number stops getting ride-status texts.
+
+        elif body in opt_in_keywords:
+            from db.firestore_client import record_sms_opt_in
+            record_sms_opt_in(normalized, body)
+
+            logger.info(
+                "SMS opt-in received from %s (keyword: %s)%s",
+                normalized,
+                body,
+                f" - matches driver {driver['name']}" if driver else "",
+            )
+
+        # Twilio expects a TwiML response (can be empty)
+        return "<Response></Response>", 200, {"Content-Type": "text/xml"}
+    except Exception as exc:
+        logger.error("SMS webhook error: %s", exc)
+        # Still return 200 so Twilio doesn't retry endlessly
+        return "<Response></Response>", 200, {"Content-Type": "text/xml"}
 
 
 if __name__ == "__main__":

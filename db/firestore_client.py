@@ -24,6 +24,7 @@ ROUTES_COLLECTION = "routes"
 ASSIGNMENTS_COLLECTION = "assignments"
 RUN_LOGS_COLLECTION = "run_logs"
 SEMESTER_SCHEDULE_COLLECTION = "semester_schedule"
+SMS_OPT_OUTS_COLLECTION = "sms_opt_outs"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -379,6 +380,104 @@ def write_run_log(
         raise RuntimeError(
             f"Failed to write run log for run_id={run_id!r}, "
             f"agent={agent!r}: {exc}"
+        ) from exc
+
+
+# --------------------------------------------------------------------------
+# SMS OPT-OUTS
+# --------------------------------------------------------------------------
+# Twilio already blocks/unblocks carrier-level SMS delivery on
+# STOP/CANCEL/etc and START/YES automatically - this collection is our
+# own app-level record of that status, keyed by E.164 phone number, so
+# scheduled sends (functions/send_sms.py) can skip an opted-out number
+# instead of attempting (and failing) a send, and so admins can see who
+# opted out without checking Twilio directly.
+def is_phone_opted_out(phone: str) -> bool:
+    """Return whether a phone number has opted out of SMS.
+
+    Args:
+        phone: Phone number in E.164 form, e.g. "+12174023446".
+
+    Returns:
+        bool: True if this phone has an opt-out record, False if it
+            has never opted out (or has since opted back in).
+
+    Raises:
+        RuntimeError: If the lookup fails.
+    """
+    try:
+        client = get_client()
+        doc = client.collection(SMS_OPT_OUTS_COLLECTION).document(phone).get()
+        if not doc.exists:
+            return False
+        return bool(doc.to_dict().get("opted_out", False))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to check SMS opt-out status for phone={phone!r}: {exc}"
+        ) from exc
+
+
+def record_sms_opt_out(phone: str, keyword: str) -> bool:
+    """Record that a phone number has opted out of SMS.
+
+    Args:
+        phone: Phone number in E.164 form, e.g. "+12174023446".
+        keyword: The opt-out keyword received (e.g. "STOP", "CANCEL"),
+            kept for reference/auditing.
+
+    Returns:
+        bool: True if the write succeeded.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    try:
+        client = get_client()
+        client.collection(SMS_OPT_OUTS_COLLECTION).document(phone).set(
+            {
+                "phone": phone,
+                "opted_out": True,
+                "keyword": keyword,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record SMS opt-out for phone={phone!r}: {exc}"
+        ) from exc
+
+
+def record_sms_opt_in(phone: str, keyword: str) -> bool:
+    """Record that a phone number has opted back in to SMS.
+
+    Args:
+        phone: Phone number in E.164 form, e.g. "+12174023446".
+        keyword: The opt-in keyword received (e.g. "START", "YES"),
+            kept for reference/auditing.
+
+    Returns:
+        bool: True if the write succeeded.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    try:
+        client = get_client()
+        client.collection(SMS_OPT_OUTS_COLLECTION).document(phone).set(
+            {
+                "phone": phone,
+                "opted_out": False,
+                "keyword": keyword,
+                "updated_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record SMS opt-in for phone={phone!r}: {exc}"
         ) from exc
 
 

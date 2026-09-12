@@ -213,6 +213,46 @@ def _get_form_responses() -> dict[str, dict]:
     return responses
 
 
+def find_driver_by_phone(phone: str) -> dict | None:
+    """Return the driver Form Responses record matching a phone number.
+
+    Used by the /sms-webhook opt-out handler (cloud_app.py) to identify
+    which driver a STOP/CANCEL reply came from, so the admin alert
+    names them instead of showing a bare phone number. Matches against
+    every driver who has ever filled out the form, not just those
+    available on a given Sunday.
+
+    Args:
+        phone: The phone number to match, in any format
+            normalize_to_e164() accepts.
+
+    Returns:
+        dict or None: The matching driver's details dict (see
+            _get_form_responses() for keys) if a match is found,
+            otherwise None (including if `phone` doesn't normalize to
+            a valid US number, or no driver's phone matches it).
+    """
+    from functions.send_sms import normalize_to_e164
+
+    try:
+        target = normalize_to_e164(phone)
+    except ValueError:
+        return None
+
+    responses = _get_form_responses()
+    for details in responses.values():
+        driver_phone = details.get("phone")
+        if not driver_phone:
+            continue
+        try:
+            if normalize_to_e164(driver_phone) == target:
+                return details
+        except ValueError:
+            continue
+
+    return None
+
+
 # --------------------------------------------------------------------------
 # Routes
 # --------------------------------------------------------------------------
