@@ -628,21 +628,30 @@ def sms_webhook():
 
                 send_email(
                     to=settings.BCC_EMAIL,
-                    subject=f"SMS Opt-Out Alert: driver {driver['name']}",
+                    subject=f"SMS Opt-Out: driver {driver['name']}",
                     body=(
                         f"Driver {driver['name']} ({normalized}) has opted out "
-                        f"of SMS messages (replied {body}).\n\n"
-                        "They're now recorded as opted-out, so future automated "
-                        "SMS reminders (Friday driver reminders, etc.) will skip "
-                        "them automatically instead of texting them. You'll want "
-                        "to find a replacement for any shifts they're already "
-                        "assigned to, or reach them directly by phone/email to "
-                        "confirm their plans."
+                        f"of ride texts (replied {body}).\n\n"
+                        "Nothing to fix on the schedule. They're still driving "
+                        "and still on the Wednesday reminder and Sunday final "
+                        "rider list emails, which send separately. The only "
+                        "thing they lose is the Friday text.\n\n"
+                        "If they ever can't drive a shift, they'll contact Dae "
+                        "directly as usual."
                     ),
                 )
+            # The email above is deliberately low-key: a driver texting
+            # STOP means "don't text me," not "I'm backing out." Drivers
+            # are committed and contact Dae directly if they can't make
+            # a shift, and they keep getting the Wednesday and Sunday
+            # driver emails either way (see send_weekly_emails.py, which
+            # mails the assigned drivers directly). So don't reword this
+            # into "find a replacement" - that sends Dae chasing a
+            # problem that doesn't exist.
+            #
             # A rider (or any unrecognized number) opting out needs no
-            # admin email - it's already recorded above, and it just
-            # means that number stops getting ride-status texts.
+            # admin email at all - it's already recorded above, and it
+            # just means that number stops getting ride-status texts.
 
         elif body in opt_in_keywords:
             from db.firestore_client import record_sms_opt_in
