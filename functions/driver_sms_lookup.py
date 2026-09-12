@@ -1,8 +1,9 @@
 # On-demand route and rider lookups a driver requests by text.
 #
 # A driver assigned to drive this Sunday texts ROUTE and gets their
-# stops, times and live rider counts; RIDERS gets the names. Handled by
-# the /sms-webhook route in cloud_app.py.
+# stops, times and live rider counts; RIDERS gets the names; SCHEDULE
+# (or DUTY) gets their remaining assigned Sundays for the semester.
+# Handled by the /sms-webhook route in cloud_app.py.
 #
 # Why this exists when the Friday reminder already lists the stops:
 # signups keep arriving until Sunday 9am, so Friday's counts are stale
@@ -23,6 +24,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime
 
 from db.firestore_client import get_semester_schedule
 from functions.read_riders_sheet import get_next_sunday_date, get_riders_for_sunday
@@ -33,7 +35,8 @@ logger = logging.getLogger(__name__)
 
 ROUTE_KEYWORDS = {"ROUTE"}
 RIDERS_KEYWORDS = {"RIDERS"}
-DRIVER_LOOKUP_KEYWORDS = ROUTE_KEYWORDS | RIDERS_KEYWORDS
+SCHEDULE_KEYWORDS = {"SCHEDULE", "DUTY"}
+DRIVER_LOOKUP_KEYWORDS = ROUTE_KEYWORDS | RIDERS_KEYWORDS | SCHEDULE_KEYWORDS
 
 
 def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None = None) -> str | None:
@@ -64,6 +67,21 @@ def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None 
         return None
 
     driver_name = (driver.get("name") or "").strip()
+
+    # Fetch the Routes tab exactly once per reply and thread it through.
+    # Every shuttle-id and stop lookup below needs it, and get_routes()
+    # hits the Sheets API fresh each call - SCHEDULE walks every week in
+    # the semester, so calling it per week would mean a dozen Sheets
+    # round trips inside a webhook Twilio abandons after ~15 seconds.
+    routes = get_routes()
+    shuttle_ids = _known_shuttle_ids(routes)
+
+    # SCHEDULE answers any roster driver, not just one assigned this
+    # Sunday - the whole point is telling someone who isn't driving this
+    # week when they next are.
+    if keyword in SCHEDULE_KEYWORDS:
+        return _build_schedule_reply(driver_name, shuttle_ids)
+
     if sunday_date is None:
         sunday_date = get_next_sunday_date()
     short_date = _format_short_date(sunday_date)
@@ -72,7 +90,7 @@ def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None 
     if entry is None:
         return f"{BRAND_PREFIX}\nNo driver schedule is set for {short_date} Sun yet."
 
-    assignment = _find_assignment(driver_name, entry)
+    assignment = _find_assignment(driver_name, entry, shuttle_ids)
 
     if assignment is None:
         return (
@@ -89,16 +107,18 @@ def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None 
     leg = assignment["leg"]
 
     if keyword in RIDERS_KEYWORDS:
-        return _build_riders_reply(shuttle_id, leg, sunday_date, short_date)
-    return _build_route_reply(shuttle_id, leg, sunday_date, short_date)
+        return _build_riders_reply(shuttle_id, leg, sunday_date, short_date, routes)
+    return _build_route_reply(shuttle_id, leg, sunday_date, short_date, routes)
 
 
 # --------------------------------------------------------------------------
 # Reply builders
 # --------------------------------------------------------------------------
-def _build_route_reply(shuttle_id: str, leg: str, sunday_date: str, short_date: str) -> str:
+def _build_route_reply(
+    shuttle_id: str, leg: str, sunday_date: str, short_date: str, routes: list[dict]
+) -> str:
     """Stops, times, and live per-stop counts for one shuttle."""
-    route = _find_route(shuttle_id)
+    route = _find_route(routes, shuttle_id)
     lines = [BRAND_PREFIX, f"Your route {short_date} Sun", _shuttle_line(route, shuttle_id, leg)]
 
     stops = (route or {}).get("stops", [])
@@ -123,7 +143,9 @@ def _build_route_reply(shuttle_id: str, leg: str, sunday_date: str, short_date: 
     return "\n".join(lines)
 
 
-def _build_riders_reply(shuttle_id: str, leg: str, sunday_date: str, short_date: str) -> str:
+def _build_riders_reply(
+    shuttle_id: str, leg: str, sunday_date: str, short_date: str, routes: list[dict]
+) -> str:
     """Rider names grouped by stop, as "Jane K", for one shuttle."""
     label = _shuttle_label(shuttle_id)
 
@@ -139,7 +161,7 @@ def _build_riders_reply(shuttle_id: str, leg: str, sunday_date: str, short_date:
         return f"{BRAND_PREFIX}\nRiders {short_date} {label}\nNo riders signed up yet."
 
     lines = [BRAND_PREFIX, f"Riders {short_date} {label}"]
-    route = _find_route(shuttle_id)
+    route = _find_route(routes, shuttle_id)
     for stop in (route or {}).get("stops", []):
         name = _stop_name(stop)
         names = riders_by_stop.get(name)
@@ -149,6 +171,43 @@ def _build_riders_reply(shuttle_id: str, leg: str, sunday_date: str, short_date:
         lines.append(f"{name} {time}: {', '.join(names)}".replace("  ", " "))
     lines.append(f"{total} total")
     return "\n".join(lines)
+
+
+def _build_schedule_reply(driver_name: str, shuttle_ids: list[str]) -> str:
+    """List the driver's remaining assigned Sundays for the semester.
+
+    Dates only, no shuttle or route: a driver checking this wants to
+    know which days they're committed to, and can text ROUTE on the day
+    for the details. Backup days are tagged, since that's the one thing
+    about a date a driver can't work out from the date itself.
+
+    Runs from today forward through the end of whatever the
+    semester_schedule holds, with no cap - drivers are typically on no
+    more than five Sundays, so the list stays short on its own.
+    """
+    today = date.today().isoformat()
+
+    rows: list[str] = []
+    for entry in sorted(get_semester_schedule(), key=lambda e: e.get("date") or ""):
+        entry_date = (entry.get("date") or "").strip()
+        if not entry_date or entry_date < today:
+            continue
+
+        assignment = _find_assignment(driver_name, entry, shuttle_ids)
+        if assignment is None:
+            continue
+
+        row = _format_day(entry_date)
+        if assignment["role"] == "backup":
+            row += " (backup)"
+        rows.append(row)
+
+    if not rows:
+        return f"{BRAND_PREFIX}\nNo upcoming driving days scheduled for you."
+
+    return "\n".join(
+        [BRAND_PREFIX, "Your driving days", *rows, f"{len(rows)} remaining"]
+    )
 
 
 # --------------------------------------------------------------------------
@@ -162,7 +221,9 @@ def _find_schedule_entry(sunday_date: str) -> dict | None:
     return None
 
 
-def _find_assignment(driver_name: str, entry: dict) -> dict | None:
+def _find_assignment(
+    driver_name: str, entry: dict, shuttle_ids: list[str]
+) -> dict | None:
     """Work out what this driver is doing that Sunday, if anything.
 
     Returns:
@@ -171,7 +232,7 @@ def _find_assignment(driver_name: str, entry: dict) -> dict | None:
             {"role": "backup"} when they're the backup, or None when
             they aren't on the schedule that week.
     """
-    for shuttle_id in _known_shuttle_ids():
+    for shuttle_id in shuttle_ids:
         base = (entry.get(shuttle_id) or "").strip() or None
         pickup = (entry.get(f"{shuttle_id}_pickup") or base or "").strip() or None
         returning = (entry.get(f"{shuttle_id}_return") or base or "").strip() or None
@@ -248,14 +309,14 @@ def _short_name(full_name: str) -> str:
 # --------------------------------------------------------------------------
 # Route helpers
 # --------------------------------------------------------------------------
-def _known_shuttle_ids() -> list[str]:
+def _known_shuttle_ids(routes: list[dict]) -> list[str]:
     """Shuttle ids from the Routes tab, in sheet order."""
-    return [route.get("shuttle_id") for route in get_routes() if route.get("shuttle_id")]
+    return [route.get("shuttle_id") for route in routes if route.get("shuttle_id")]
 
 
-def _find_route(shuttle_id: str) -> dict | None:
+def _find_route(routes: list[dict], shuttle_id: str) -> dict | None:
     """Return the Routes-tab entry for one shuttle, or None."""
-    for route in get_routes():
+    for route in routes:
         if route.get("shuttle_id") == shuttle_id:
             return route
     return None
@@ -292,7 +353,11 @@ def _strip_ampm(pickup_time: str | None) -> str:
 
 def _format_short_date(iso_date: str) -> str:
     """Convert "2026-09-13" to "9/13/26"."""
-    from datetime import datetime
-
     parsed = datetime.strptime(iso_date, "%Y-%m-%d")
     return f"{parsed.month}/{parsed.day}/{parsed.strftime('%y')}"
+
+
+def _format_day(iso_date: str) -> str:
+    """Convert "2026-09-13" to "9/13" - the year is noise within a semester."""
+    parsed = datetime.strptime(iso_date, "%Y-%m-%d")
+    return f"{parsed.month}/{parsed.day}"

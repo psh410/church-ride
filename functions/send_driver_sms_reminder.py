@@ -17,7 +17,8 @@ from functions.send_sms import BRAND_PREFIX, normalize_to_e164, send_sms
 # free. Rider messages keep the plain OPT_OUT_NOTICE - riders have no
 # ROUTE or RIDERS access.
 DRIVER_CLOSING_NOTICE = (
-    "Reply ROUTE or RIDERS for details, HELP for help, STOP to opt out."
+    "Reply ROUTE, RIDERS or SCHEDULE for details, HELP for help, "
+    "STOP to opt out."
 )
 
 logger = logging.getLogger(__name__)
