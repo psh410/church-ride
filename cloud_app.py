@@ -576,6 +576,10 @@ def sms_webhook():
       current ride counts, but only to numbers on the
       settings.ADMIN_SMS_PHONES allowlist - anyone else gets no reply
       at all, so the keyword isn't discoverable by outsiders.
+    - Driver lookup keywords (ROUTE/RIDERS). Replies with that driver's
+      stops and live rider counts, or their rider names, for the
+      upcoming Sunday. Authorized off the driver roster rather than an
+      allowlist, and only for a driver actually assigned that week.
 
     Always returns 200 with TwiML (empty unless we're replying) so
     Twilio doesn't retry.
@@ -668,7 +672,42 @@ def sms_webhook():
                 is_admin_phone,
             )
 
-            if body in ADMIN_SUMMARY_KEYWORDS:
+            from functions.driver_sms_lookup import (
+                DRIVER_LOOKUP_KEYWORDS,
+                build_driver_lookup_reply,
+            )
+
+            if body in DRIVER_LOOKUP_KEYWORDS:
+                # Authorization comes from the driver roster itself: a
+                # number that isn't a driver gets nothing, and a driver
+                # not assigned this Sunday is told so rather than given
+                # someone else's route.
+                try:
+                    reply = build_driver_lookup_reply(normalized, body)
+                except Exception as exc:
+                    logger.error("Could not build %s reply: %s", body, exc)
+                    reply = (
+                        "CFC Rides: couldn't pull your route just now. "
+                        "Please try again in a minute."
+                    )
+
+                if reply is None:
+                    logger.warning(
+                        "Ignoring %s keyword from %s: not a known driver.",
+                        body,
+                        normalized,
+                    )
+                else:
+                    from xml.sax.saxutils import escape
+
+                    logger.info("Replied to %s with %s details.", normalized, body)
+                    return (
+                        f"<Response><Message>{escape(reply)}</Message></Response>",
+                        200,
+                        {"Content-Type": "text/xml"},
+                    )
+
+            elif body in ADMIN_SUMMARY_KEYWORDS:
                 if not is_admin_phone(normalized):
                     # Silence, not an error message - no reason to tell
                     # an unknown number that this keyword exists.

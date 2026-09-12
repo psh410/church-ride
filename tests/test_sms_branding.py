@@ -1,7 +1,6 @@
 # Guards the rules every outbound SMS has to follow: it starts with
 # BRAND_PREFIX so recipients know it's from CFC, and (with one
-# deliberate exception) it ends with OPT_OUT_NOTICE so they know how to
-# stop.
+# deliberate exception) it tells them how to stop.
 #
 # The exception is the admin summary, the reply to an admin's UPDATE
 # text. Twilio requires opt-out language in the initial message to a
@@ -36,7 +35,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import functions.send_admin_summary as summary_mod
 import functions.send_driver_sms_reminder as driver_mod
 import functions.send_rider_confirmation as rider_mod
-from functions.send_sms import BRAND_PREFIX, OPT_OUT_NOTICE
+from functions.send_sms import BRAND_PREFIX
+
+# The compliance-relevant substring, rather than a specific constant.
+# Driver messages close with DRIVER_CLOSING_NOTICE (which also advertises
+# the ROUTE and RIDERS keywords) and rider messages with
+# OPT_OUT_NOTICE, so asserting one exact constant would break every time
+# either line is reworded. What actually has to hold is that the opt-out
+# instruction is present at all.
+OPT_OUT_SUBSTRING = "STOP to opt out"
 
 # Messages that intentionally omit the opt-out notice.
 _NO_OPT_OUT_NOTICE = {"admin summary"}
@@ -140,13 +147,13 @@ def main() -> int:
             failures.append(f"{label}: missing brand prefix {BRAND_PREFIX!r}")
 
         if label in _NO_OPT_OUT_NOTICE:
-            if OPT_OUT_NOTICE in text:
+            if OPT_OUT_SUBSTRING in text:
                 failures.append(
                     f"{label}: should NOT carry the opt-out notice "
                     "(it's a reply to a conversation the admin started)"
                 )
-        elif OPT_OUT_NOTICE not in text:
-            failures.append(f"{label}: missing opt-out notice {OPT_OUT_NOTICE!r}")
+        elif OPT_OUT_SUBSTRING not in text:
+            failures.append(f"{label}: missing opt-out instruction")
 
         print(f"[{_segments(text)} segment(s), {len(text):3d} chars] {label}")
         print(f"    {text.replace(chr(10), chr(10) + '    ')}")
@@ -163,7 +170,7 @@ def main() -> int:
 
     print(
         f"All {len(messages)} message types branded correctly "
-        f"({len(messages) - len(_NO_OPT_OUT_NOTICE)} with the opt-out notice, "
+        f"({len(messages) - len(_NO_OPT_OUT_NOTICE)} with opt-out instructions, "
         f"{len(_NO_OPT_OUT_NOTICE)} intentionally without)."
     )
     return 0
