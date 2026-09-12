@@ -145,6 +145,18 @@ TWILIO_ACCOUNT_SID = _get_secret("TWILIO_ACCOUNT_SID")
 TWILIO_AUTH_TOKEN = _get_secret("TWILIO_AUTH_TOKEN")
 TWILIO_MESSAGING_SERVICE_SID = _get_secret("TWILIO_MESSAGING_SERVICE_SID")
 
+# Phone numbers allowed to text the "UPDATE" keyword and get the ride
+# summary back (see functions/send_admin_summary.py). Stored as a
+# comma-separated string in .env / Secret Manager, e.g.
+# "+17034010571,217-555-0100" - formatting doesn't matter, since numbers
+# are normalized to E.164 before comparison. This is an allowlist: a
+# number that isn't here gets no reply at all. Not in
+# _REQUIRED_SETTINGS, since the feature is optional.
+_admin_sms_phones_raw = _get_secret("ADMIN_SMS_PHONES", "")
+ADMIN_SMS_PHONES = [
+    phone.strip() for phone in _admin_sms_phones_raw.split(",") if phone.strip()
+]
+
 # --------------------------------------------------------------------------
 # Validation
 # --------------------------------------------------------------------------

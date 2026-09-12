@@ -527,19 +527,53 @@ def send_morning_prayer_reminder_route():
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@app.route("/preview-admin-summary", methods=["GET"])
+def preview_admin_summary():
+    """Return the admin ride summary as plain text without texting anyone.
+
+    Read-only and safe to hit any time - it's the same text an admin
+    would get by replying UPDATE, so the wording and counts can be
+    checked with curl before (or instead of) sending a real SMS.
+
+    Optional query arg:
+        sunday: an ISO "YYYY-MM-DD" Sunday to summarize instead of the
+            upcoming one, e.g. /preview-admin-summary?sunday=2026-09-13.
+    """
+    try:
+        from flask import request
+
+        from functions.send_admin_summary import build_admin_summary
+
+        sunday_date = request.args.get("sunday") or None
+        summary = build_admin_summary(sunday_date)
+        return summary, 200, {"Content-Type": "text/plain; charset=utf-8"}
+    except Exception as exc:
+        logger.error("Admin summary preview failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/sms-webhook", methods=["POST"])
 def sms_webhook():
-    """Receive incoming SMS events from Twilio, watching for opt-out
-    (STOP/CANCEL/etc) and opt-in (START/YES) keywords.
+    """Handle incoming SMS from Twilio: opt-out, opt-in, and UPDATE.
 
-    Twilio already blocks/unblocks carrier-level delivery on these
-    keywords automatically - this endpoint additionally records each
-    phone's status in Firestore (db.firestore_client.record_sms_opt_out
-    / record_sms_opt_in) so our own scheduled sends (functions/send_sms.py)
-    skip an opted-out number instead of attempting a send, and emails
-    the admin when a DRIVER opts out, since that needs a human to
-    arrange shift coverage (a rider opting out just stops their own
-    ride texts, no action needed).
+    Three kinds of inbound message matter here:
+
+    - Opt-out keywords (STOP/STOPALL/UNSUBSCRIBE/CANCEL/END/QUIT).
+      Twilio already blocks carrier-level delivery itself; we
+      additionally record the phone in Firestore so our own sends
+      (functions/send_sms.py) skip it, and email the admin when the
+      number belongs to a DRIVER, since that needs a human to arrange
+      shift coverage. A rider opting out just stops their own ride
+      texts, so it's recorded silently.
+    - Opt-in keywords (START/YES). Recorded so a driver who comes back
+      starts receiving reminders again.
+    - Admin summary keywords (UPDATE/STATUS). Replies inline with the
+      current ride counts, but only to numbers on the
+      settings.ADMIN_SMS_PHONES allowlist - anyone else gets no reply
+      at all, so the keyword isn't discoverable by outsiders.
+
+    Always returns 200 with TwiML (empty unless we're replying) so
+    Twilio doesn't retry.
     """
     try:
         from flask import request
@@ -551,14 +585,17 @@ def sms_webhook():
         opt_out_keywords = {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT"}
         opt_in_keywords = {"START", "YES"}
 
-        if body in opt_out_keywords or body in opt_in_keywords:
-            from functions.send_sms import normalize_to_e164
+        from functions.send_sms import normalize_to_e164
 
-            try:
-                normalized = normalize_to_e164(from_number)
-            except ValueError:
-                normalized = from_number
+        try:
+            normalized = normalize_to_e164(from_number)
+        except ValueError:
+            normalized = from_number
 
+        if body in opt_out_keywords:
+            # Only the opt-out branch needs the driver roster (to name
+            # them in the alert email), so the Sheets read stays out of
+            # every other inbound message's path.
             driver = None
             try:
                 from functions.read_sheets import find_driver_by_phone
@@ -570,7 +607,6 @@ def sms_webhook():
                     exc_info=True,
                 )
 
-        if body in opt_out_keywords:
             from db.firestore_client import record_sms_opt_out
             record_sms_opt_out(normalized, body)
 
@@ -608,13 +644,50 @@ def sms_webhook():
             record_sms_opt_in(normalized, body)
 
             logger.info(
-                "SMS opt-in received from %s (keyword: %s)%s",
-                normalized,
-                body,
-                f" - matches driver {driver['name']}" if driver else "",
+                "SMS opt-in received from %s (keyword: %s).", normalized, body
             )
 
-        # Twilio expects a TwiML response (can be empty)
+        else:
+            from functions.send_admin_summary import (
+                ADMIN_SUMMARY_KEYWORDS,
+                build_admin_summary,
+                is_admin_phone,
+            )
+
+            if body in ADMIN_SUMMARY_KEYWORDS:
+                if not is_admin_phone(normalized):
+                    # Silence, not an error message - no reason to tell
+                    # an unknown number that this keyword exists.
+                    logger.warning(
+                        "Ignoring %s keyword from non-admin number %s.",
+                        body,
+                        normalized,
+                    )
+                else:
+                    try:
+                        summary = build_admin_summary()
+                        logger.info(
+                            "Replied with ride summary to admin %s.", normalized
+                        )
+                    except Exception as exc:
+                        # Reply anyway: an admin who texted and got
+                        # nothing back can't tell the difference between
+                        # a broken feature and a slow one.
+                        logger.error("Could not build admin summary: %s", exc)
+                        summary = (
+                            "CFC Rides: couldn't pull the ride counts just now. "
+                            "Please try again in a minute."
+                        )
+
+                    from xml.sax.saxutils import escape
+
+                    return (
+                        f"<Response><Message>{escape(summary)}</Message></Response>",
+                        200,
+                        {"Content-Type": "text/xml"},
+                    )
+
+        # Twilio expects a TwiML response (empty means "no reply")
         return "<Response></Response>", 200, {"Content-Type": "text/xml"}
     except Exception as exc:
         logger.error("SMS webhook error: %s", exc)
