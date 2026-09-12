@@ -18,7 +18,11 @@ import logging
 from datetime import datetime
 
 from config import settings
-from db.firestore_client import get_semester_schedule
+from db.firestore_client import (
+    get_semester_schedule,
+    record_disclosure_sent,
+    was_disclosure_sent,
+)
 from functions.read_riders_sheet import (
     get_next_sunday_date,
     get_riders_for_sunday,
@@ -33,6 +37,17 @@ logger = logging.getLogger(__name__)
 # QUIT/START/YES/HELP/INFO) - Twilio answers those itself, so they'd
 # never behave like a normal keyword.
 ADMIN_SUMMARY_KEYWORDS = {"UPDATE", "STATUS"}
+
+# Appended to a number's FIRST reply only. Texting UPDATE is itself the
+# opt-in (the admin initiated it), which makes that first reply the
+# initial message to them - the one place Twilio's policy actually
+# requires opt-out language. Later replies are conversational and skip
+# it, which keeps the recurring message to one segment and avoids
+# inviting a STOP that would cut off driver reminders too.
+FIRST_CONTACT_DISCLOSURE = (
+    f"Text UPDATE any time for current counts. "
+    f"Msg & data rates may apply. {OPT_OUT_NOTICE}"
+)
 
 
 def is_admin_phone(phone: str) -> bool:
@@ -73,12 +88,13 @@ def build_admin_summary(sunday_date: str | None = None) -> str:
 
     Produces something like:
 
-        CFC Rides: For Sunday service 9/13/26, 50 riders requested.
-        Shuttle 1 (Sangwoo): 10
-        Shuttle 2 (Peter): 8
-        Backup driver: Youngwook
-        Non-shuttle requests: 32
-        Reply HELP for help, STOP to opt out.
+        CFC Rides:
+        Update for 9/13/26 Sun Service
+        50 rides requested
+        S1 (Sangwoo): 10
+        S2 (Peter): 8
+        Backup: Youngwook
+        Non-shuttle: 32
 
     Shuttles are listed dynamically from the Routes tab, so adding a
     third shuttle makes it appear here without a code change. Rider
@@ -120,17 +136,70 @@ def build_admin_summary(sunday_date: str | None = None) -> str:
     entry = _get_schedule_entry(sunday_date)
 
     lines = [
-        f"{BRAND_PREFIX} For Sunday service {_format_short_date(sunday_date)}, "
-        f"{len(riders)} riders requested."
+        BRAND_PREFIX,
+        f"Update for {_format_short_date(sunday_date)} Sun Service",
+        f"{len(riders)} rides requested",
     ]
     for shuttle_id, total in shuttle_totals.items():
         driver = _driver_label(entry, shuttle_id)
         lines.append(f"{_shuttle_label(shuttle_id)} ({driver}): {total}")
-    lines.append(f"Backup driver: {_backup_label(entry)}")
-    lines.append(f"Non-shuttle requests: {non_shuttle_total}")
-    lines.append(OPT_OUT_NOTICE)
+    lines.append(f"Backup: {_backup_label(entry)}")
+    lines.append(f"Non-shuttle: {non_shuttle_total}")
 
+    # No opt-out notice on the counts themselves - build_admin_reply()
+    # below adds the disclosure on a number's first reply only. Don't
+    # append OPT_OUT_NOTICE here.
     return "\n".join(lines)
+
+
+def build_admin_reply(phone: str, sunday_date: str | None = None) -> str:
+    """Build the full reply to send one admin, disclosure included if due.
+
+    The counts are the same for everyone; what varies is whether this
+    number has been sent the program disclosure yet. The first time a
+    number texts UPDATE, the disclosure is appended and recorded, so
+    every later reply is just the counts.
+
+    Args:
+        phone: The requesting admin's number, E.164 preferred.
+        sunday_date: Optional ISO "YYYY-MM-DD" Sunday to summarize.
+            Defaults to the upcoming Sunday.
+
+    Returns:
+        str: The SMS body to reply with.
+
+    Raises:
+        RuntimeError: If the rider signups can't be read (from
+            build_admin_summary). Disclosure bookkeeping never raises:
+            if Firestore is unreachable we err toward including the
+            disclosure, since sending it twice is harmless and skipping
+            it is the compliance problem.
+    """
+    summary = build_admin_summary(sunday_date)
+
+    try:
+        already_disclosed = was_disclosure_sent(phone)
+    except RuntimeError as exc:
+        logger.warning(
+            "Could not check disclosure status for %s (%s); "
+            "including the disclosure to be safe.",
+            phone,
+            exc,
+        )
+        already_disclosed = False
+
+    if already_disclosed:
+        return summary
+
+    try:
+        record_disclosure_sent(phone)
+    except RuntimeError as exc:
+        # Send it anyway. The cost of failing to record is that they see
+        # the disclosure again next time, which is noise, not a problem.
+        logger.warning("Could not record disclosure for %s: %s", phone, exc)
+
+    logger.info("Including first-contact disclosure in reply to %s.", phone)
+    return f"{summary}\n{FIRST_CONTACT_DISCLOSURE}"
 
 
 # --------------------------------------------------------------------------
@@ -194,7 +263,15 @@ def _backup_label(entry: dict | None) -> str:
 
 
 def _shuttle_label(shuttle_id: str) -> str:
-    """Turn a shuttle_id like "shuttle_1" into a label like "Shuttle 1"."""
+    """Turn a shuttle_id like "shuttle_1" into a short label like "S1".
+
+    Abbreviated deliberately: spelling out "Shuttle 1" leaves only one
+    character of headroom before the 160-character single-segment limit
+    once a third shuttle exists, and any slightly longer driver name
+    would tip the whole message into two segments.
+    """
+    if shuttle_id.startswith("shuttle_"):
+        return f"S{shuttle_id[len('shuttle_'):]}"
     return shuttle_id.replace("_", " ").title()
 
 

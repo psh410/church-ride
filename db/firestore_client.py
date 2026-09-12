@@ -392,6 +392,11 @@ def write_run_log(
 # scheduled sends (functions/send_sms.py) can skip an opted-out number
 # instead of attempting (and failing) a send, and so admins can see who
 # opted out without checking Twilio directly.
+#
+# Despite the name, the document per phone is really "everything we
+# track about this number": it also carries disclosure_sent, marking
+# whether that number has been sent the program disclosure yet. Kept in
+# one document on purpose, so a reply needs one read rather than two.
 def is_phone_opted_out(phone: str) -> bool:
     """Return whether a phone number has opted out of SMS.
 
@@ -446,6 +451,67 @@ def record_sms_opt_out(phone: str, keyword: str) -> bool:
     except Exception as exc:
         raise RuntimeError(
             f"Failed to record SMS opt-out for phone={phone!r}: {exc}"
+        ) from exc
+
+
+def was_disclosure_sent(phone: str) -> bool:
+    """Return whether this phone has already been sent the SMS disclosure.
+
+    Used by functions/send_admin_summary.py: an admin's very first
+    UPDATE reply carries the program disclosure and opt-out language,
+    since that reply is the initial message to them and Twilio requires
+    it there. Every later reply is just the counts.
+
+    Args:
+        phone: Phone number in E.164 form, e.g. "+12174023446".
+
+    Returns:
+        bool: True if the disclosure has already gone out to this
+            number, False if it hasn't (or the number is unknown).
+
+    Raises:
+        RuntimeError: If the lookup fails. Callers should treat a
+            failure as "not yet sent" and include the disclosure, since
+            sending it twice is harmless and skipping it is not.
+    """
+    try:
+        client = get_client()
+        doc = client.collection(SMS_OPT_OUTS_COLLECTION).document(phone).get()
+        if not doc.exists:
+            return False
+        return bool(doc.to_dict().get("disclosure_sent", False))
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to check disclosure status for phone={phone!r}: {exc}"
+        ) from exc
+
+
+def record_disclosure_sent(phone: str) -> bool:
+    """Record that this phone has now been sent the SMS disclosure.
+
+    Args:
+        phone: Phone number in E.164 form, e.g. "+12174023446".
+
+    Returns:
+        bool: True if the write succeeded.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    try:
+        client = get_client()
+        client.collection(SMS_OPT_OUTS_COLLECTION).document(phone).set(
+            {
+                "phone": phone,
+                "disclosure_sent": True,
+                "disclosure_sent_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record disclosure for phone={phone!r}: {exc}"
         ) from exc
 
 

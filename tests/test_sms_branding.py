@@ -1,6 +1,15 @@
-# Guards the one rule every outbound SMS has to follow: it starts with
-# BRAND_PREFIX so recipients know it's from CFC, and it ends with
-# OPT_OUT_NOTICE so they know how to stop.
+# Guards the rules every outbound SMS has to follow: it starts with
+# BRAND_PREFIX so recipients know it's from CFC, and (with one
+# deliberate exception) it ends with OPT_OUT_NOTICE so they know how to
+# stop.
+#
+# The exception is the admin summary, the reply to an admin's UPDATE
+# text. Twilio requires opt-out language in the initial message to a
+# recipient, not in every reply within a conversation the recipient
+# started, and we keep it off that one on purpose - see the comment in
+# functions/send_admin_summary.py. This test pins that decision down so
+# nobody adds it back by accident, and so nobody removes it from the
+# messages that do need it.
 #
 # This exists because the wording drifted three separate ways before the
 # constants in functions/send_sms.py were introduced: the live senders
@@ -28,6 +37,9 @@ import functions.send_admin_summary as summary_mod
 import functions.send_driver_sms_reminder as driver_mod
 import functions.send_rider_confirmation as rider_mod
 from functions.send_sms import BRAND_PREFIX, OPT_OUT_NOTICE
+
+# Messages that intentionally omit the opt-out notice.
+_NO_OPT_OUT_NOTICE = {"admin summary"}
 
 _STOP_MAP = {"FAR": "shuttle_1", "SDRP": "shuttle_2"}
 _ROUTES = [
@@ -126,7 +138,14 @@ def main() -> int:
     for label, text in messages.items():
         if not text.startswith(BRAND_PREFIX):
             failures.append(f"{label}: missing brand prefix {BRAND_PREFIX!r}")
-        if OPT_OUT_NOTICE not in text:
+
+        if label in _NO_OPT_OUT_NOTICE:
+            if OPT_OUT_NOTICE in text:
+                failures.append(
+                    f"{label}: should NOT carry the opt-out notice "
+                    "(it's a reply to a conversation the admin started)"
+                )
+        elif OPT_OUT_NOTICE not in text:
             failures.append(f"{label}: missing opt-out notice {OPT_OUT_NOTICE!r}")
 
         print(f"[{_segments(text)} segment(s), {len(text):3d} chars] {label}")
@@ -142,7 +161,11 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
 
-    print(f"All {len(messages)} message types carry the brand and opt-out notice.")
+    print(
+        f"All {len(messages)} message types branded correctly "
+        f"({len(messages) - len(_NO_OPT_OUT_NOTICE)} with the opt-out notice, "
+        f"{len(_NO_OPT_OUT_NOTICE)} intentionally without)."
+    )
     return 0
 
 

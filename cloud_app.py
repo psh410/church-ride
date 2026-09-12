@@ -655,7 +655,7 @@ def sms_webhook():
         else:
             from functions.send_admin_summary import (
                 ADMIN_SUMMARY_KEYWORDS,
-                build_admin_summary,
+                build_admin_reply,
                 is_admin_phone,
             )
 
@@ -670,7 +670,7 @@ def sms_webhook():
                     )
                 else:
                     try:
-                        summary = build_admin_summary()
+                        summary = build_admin_reply(normalized)
                         logger.info(
                             "Replied with ride summary to admin %s.", normalized
                         )
