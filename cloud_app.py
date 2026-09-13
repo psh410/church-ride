@@ -426,6 +426,54 @@ def test_monday_schedule() -> tuple:
 # ============================================
 
 
+def _scheduled_job_response(result: dict) -> tuple:
+    """Turn a job's result dict into a response Cloud Scheduler can act on.
+
+    These endpoints used to return 200 no matter what the job reported.
+    That meant a transient failure - a cold-start credentials blip, a
+    Sheets hiccup - was reported to Cloud Scheduler as success and never
+    retried, even though every job already has retry configured. On
+    2026-09-12 the Thursday prayer reminder failed exactly that way
+    (metadata server not ready on a cold container) and nobody found out
+    until the logs were read by hand two days later. Morning Prayer ran
+    36 seconds later on the warm container and was fine.
+
+    Returning 500 on a total failure switches that retry back on.
+
+    Deliberately narrow about what counts as failure, because a retry
+    re-runs the whole job and would re-send to anyone already contacted:
+
+    - {"status": "failed"} → 500. Nothing went out, retrying is safe.
+    - {"sent_count": 0} with failures listed → 500. Tried and failed.
+    - {"sent_count": 0} with no failures → 200. Nothing to do: no
+      schedule entry or no drivers assigned. Retrying can't help, and a
+      break week would retry forever.
+    - "skipped" → 200. A legitimate no-meeting week, not a failure.
+    - Anything that sent something → 200, even with partial failures,
+      since a retry would duplicate what already went out.
+
+    Args:
+        result: The dict returned by the job function.
+
+    Returns:
+        tuple: (JSON response, status code) for the route to return.
+    """
+    status = result.get("status")
+    failed = status in {"failed", "error"} or (
+        result.get("sent_count") == 0 and result.get("failures")
+    )
+
+    if failed:
+        logger.error(
+            "Scheduled job reported failure; returning 500 so Cloud Scheduler "
+            "retries instead of recording a false success: %s",
+            result,
+        )
+        return jsonify(result), 500
+
+    return jsonify(result), 200
+
+
 @app.route("/send-monday-schedule", methods=["POST"])
 def route_send_monday_schedule() -> tuple:
     """Trigger the Monday semester-schedule email to the overseer.
@@ -436,7 +484,7 @@ def route_send_monday_schedule() -> tuple:
     """
     try:
         result = send_monday_schedule()
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("send_monday_schedule failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -453,7 +501,7 @@ def route_send_wednesday_reminder() -> tuple:
     try:
         sunday = get_next_sunday_date()
         result = send_wednesday_reminder(sunday)
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("send_wednesday_reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -470,7 +518,7 @@ def route_send_saturday_update() -> tuple:
     try:
         sunday = get_next_sunday_date()
         result = send_saturday_update(sunday)
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("send_saturday_update failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -487,7 +535,7 @@ def route_send_saturday_driver_assignment() -> tuple:
     try:
         sunday = get_next_sunday_date()
         result = send_saturday_driver_assignment(sunday)
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("send_saturday_driver_assignment failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -500,7 +548,7 @@ def send_driver_sms_reminder_route():
     try:
         from functions.send_driver_sms_reminder import send_driver_sms_reminders
         result = send_driver_sms_reminders()
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("Driver SMS reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -513,7 +561,7 @@ def send_thursday_prayer_reminder_route():
     try:
         from functions.prayer.thursday import send_thursday_reminder
         result = send_thursday_reminder()
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("Thursday prayer reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
@@ -526,7 +574,7 @@ def send_morning_prayer_reminder_route():
     try:
         from functions.prayer.morning import send_morning_reminder
         result = send_morning_reminder()
-        return jsonify(result), 200
+        return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("Morning prayer reminder failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
