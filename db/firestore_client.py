@@ -25,6 +25,7 @@ ASSIGNMENTS_COLLECTION = "assignments"
 RUN_LOGS_COLLECTION = "run_logs"
 SEMESTER_SCHEDULE_COLLECTION = "semester_schedule"
 SMS_OPT_OUTS_COLLECTION = "sms_opt_outs"
+RIDER_CONFIRMATIONS_COLLECTION = "rider_confirmations"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -544,6 +545,76 @@ def record_sms_opt_in(phone: str, keyword: str) -> bool:
     except Exception as exc:
         raise RuntimeError(
             f"Failed to record SMS opt-in for phone={phone!r}: {exc}"
+        ) from exc
+
+
+# --------------------------------------------------------------------------
+# RIDER SIGNUP CONFIRMATIONS
+# --------------------------------------------------------------------------
+# One document per (phone, Sunday), written when a signup confirmation
+# text goes out. Guards against sending the same rider two confirmations
+# for the same week, whether from a double form submission or a retried
+# webhook call. Independent of the Apps Script's own "/duplicate" flag on
+# purpose: that flag can only catch what the script itself sees.
+def was_rider_confirmed(phone: str, sunday_date: str) -> bool:
+    """Return whether this phone already got a confirmation for this Sunday.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+
+    Returns:
+        bool: True if a confirmation was already recorded.
+
+    Raises:
+        RuntimeError: If the lookup fails.
+    """
+    try:
+        client = get_client()
+        doc = (
+            client.collection(RIDER_CONFIRMATIONS_COLLECTION)
+            .document(f"{phone}_{sunday_date}")
+            .get()
+        )
+        return doc.exists
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to check rider confirmation for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+def record_rider_confirmed(phone: str, sunday_date: str, details: Optional[dict] = None) -> bool:
+    """Record that a signup confirmation went out to this phone.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+        details: Optional extra context (stop, category, row number).
+
+    Returns:
+        bool: True if the write succeeded.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    try:
+        client = get_client()
+        client.collection(RIDER_CONFIRMATIONS_COLLECTION).document(
+            f"{phone}_{sunday_date}"
+        ).set(
+            {
+                "phone": phone,
+                "sunday_date": sunday_date,
+                "details": details or {},
+                "confirmed_at": firestore.SERVER_TIMESTAMP,
+            }
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record rider confirmation for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
         ) from exc
 
 

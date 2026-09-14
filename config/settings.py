@@ -152,6 +152,12 @@ TWILIO_MESSAGING_SERVICE_SID = _get_secret("TWILIO_MESSAGING_SERVICE_SID")
 # are normalized to E.164 before comparison. This is an allowlist: a
 # number that isn't here gets no reply at all. Not in
 # _REQUIRED_SETTINGS, since the feature is optional.
+# Shared secret the signup form's Apps Script sends with each
+# confirmation request, so a public endpoint can't be used to make the
+# church number text people. Not in _REQUIRED_SETTINGS: if it's unset,
+# the endpoint refuses every request rather than running unprotected.
+RIDER_CONFIRMATION_SECRET = _get_secret("RIDER_CONFIRMATION_SECRET")
+
 _admin_sms_phones_raw = _get_secret("ADMIN_SMS_PHONES", "")
 ADMIN_SMS_PHONES = [
     phone.strip() for phone in _admin_sms_phones_raw.split(",") if phone.strip()

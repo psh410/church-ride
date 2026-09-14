@@ -322,6 +322,90 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
     return _deduplicate_riders(riders)
 
 
+# Header of the optional SMS consent checkbox on the signup form. Matched
+# by a prefix rather than the full string, because the visible label is a
+# long sentence ("By checking below, you agree to receive SMS ride
+# updates...") and Google truncates or rewords headers when a form
+# question is edited. An unchecked optional checkbox leaves the cell
+# empty, so a non-empty cell is consent.
+SMS_CONSENT_HEADER_PREFIX = "sms consent"
+
+
+def get_signup_row(row_number: int) -> dict | None:
+    """Return one signup by its 1-indexed sheet row, consent included.
+
+    Used by the rider confirmation flow: the Apps Script hands over the
+    row it just flagged, and this reads that row straight from the sheet
+    so no caller has to be trusted with a phone number.
+
+    Args:
+        row_number: The 1-indexed row in "Form Responses 1", where row 1
+            is the header. So the first signup is row 2.
+
+    Returns:
+        dict or None: {"name", "email", "phone", "stop", "grade",
+            "submitted_at", "sms_consent" (bool)}, or None if the row
+            doesn't exist or has no timestamp. "stop" is the raw cell,
+            so it still carries any "/duplicate" or "/driver" flag the
+            Apps Script appended.
+
+    Raises:
+        RuntimeError: If the sheet can't be read.
+    """
+    try:
+        service = get_sheet_client()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
+            .execute()
+        )
+        rows = result.get("values", [])
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read '{FORM_RESPONSES_TAB}' tab: {exc}") from exc
+
+    if not rows or row_number < 2 or row_number > len(rows):
+        logger.warning(
+            "Signup row %s is outside the %s rows in '%s'.",
+            row_number,
+            len(rows),
+            FORM_RESPONSES_TAB,
+        )
+        return None
+
+    header = rows[0]
+    row = rows[row_number - 1]
+
+    if not _cell(row, _TIMESTAMP_COL):
+        logger.warning("Signup row %s has no timestamp; ignoring.", row_number)
+        return None
+
+    consent_index = -1
+    for index, cell in enumerate(header):
+        if str(cell).strip().lower().startswith(SMS_CONSENT_HEADER_PREFIX):
+            consent_index = index
+            break
+
+    if consent_index == -1:
+        # Fail closed: no consent column means we cannot prove anyone
+        # opted in, so nothing should be texted.
+        logger.error(
+            "No column starting with %r found in '%s'; treating as no consent.",
+            SMS_CONSENT_HEADER_PREFIX,
+            FORM_RESPONSES_TAB,
+        )
+
+    return {
+        "name": _cell(row, _NAME_COL),
+        "email": _cell(row, _EMAIL_COL) or None,
+        "phone": _cell(row, _PHONE_COL),
+        "stop": _cell(row, _STOP_COL),
+        "grade": _cell(row, _GRADE_COL),
+        "submitted_at": _cell(row, _TIMESTAMP_COL),
+        "sms_consent": bool(consent_index != -1 and _cell(row, consent_index).strip()),
+    }
+
+
 def get_all_riders_for_sunday(sunday_date: str) -> dict:
     """Return every signup for a Sunday, split into shuttle/non-shuttle groups.
 

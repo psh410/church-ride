@@ -4,6 +4,8 @@
 # driver assignment) instead of each job running as a separate Cloud
 # Function - this keeps all of them behind one deployed service.
 
+import hmac
+
 from flask import Flask, jsonify, redirect
 from dotenv import load_dotenv
 
@@ -483,6 +485,62 @@ def preview_admin_summary():
         return summary, 200, {"Content-Type": "text/plain; charset=utf-8"}
     except Exception as exc:
         logger.error("Admin summary preview failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/confirm-rider-signup", methods=["POST"])
+def confirm_rider_signup():
+    """Send the signup confirmation text for one row of the rider sheet.
+
+    Called by the Apps Script attached to the signup form, right after it
+    has written and flagged the row. Expects JSON:
+
+        {"row": 42, "secret": "..."}
+
+    Deliberately takes a row number and not a phone number. A public
+    endpoint that texts whatever number it's handed is a spam relay
+    billed to this Twilio account and sent under this brand's A2P
+    registration, so the row is read from the sheet and the phone comes
+    from there. The worst an attacker with the secret can do is re-send
+    a confirmation to someone who genuinely signed up, and the
+    per-(phone, Sunday) record in Firestore stops even that.
+
+    Returns 403 on a bad or missing secret, and 200 with the outcome
+    otherwise, including when nothing was sent (no consent, duplicate,
+    already confirmed). Those aren't failures, so they shouldn't make
+    the Apps Script retry.
+    """
+    try:
+        from flask import request
+
+        from config import settings
+
+        payload = request.get_json(silent=True) or {}
+        secret = payload.get("secret", "")
+
+        if not settings.RIDER_CONFIRMATION_SECRET:
+            logger.error(
+                "RIDER_CONFIRMATION_SECRET is not configured; refusing the request."
+            )
+            return jsonify({"status": "error", "error": "not configured"}), 403
+
+        if not hmac.compare_digest(str(secret), str(settings.RIDER_CONFIRMATION_SECRET)):
+            logger.warning("Rejected /confirm-rider-signup: bad secret.")
+            return jsonify({"status": "error", "error": "forbidden"}), 403
+
+        try:
+            row = int(payload.get("row", 0))
+        except (TypeError, ValueError):
+            row = 0
+        if row < 2:
+            return jsonify({"status": "error", "error": "invalid row"}), 400
+
+        from functions.send_rider_confirmation import confirm_signup
+
+        result = confirm_signup(row)
+        return jsonify(result), 200
+    except Exception as exc:
+        logger.error("Rider signup confirmation failed: %s", exc)
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
