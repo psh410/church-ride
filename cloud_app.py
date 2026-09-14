@@ -563,6 +563,10 @@ def sms_webhook():
       current ride counts, but only to numbers on the
       settings.ADMIN_SMS_PHONES allowlist - anyone else gets no reply
       at all, so the keyword isn't discoverable by outsiders.
+    - Admin reset keyword (RESETME). Clears the texting admin's own
+      ride confirmation for the coming Sunday so a test signup can be
+      run again. Same allowlist as UPDATE, and it can only ever touch
+      the number it was sent from.
     - Driver lookup keywords (ROUTE/RIDERS). Replies with that driver's
       stops and live rider counts, or their rider names, for the
       upcoming Sunday. Authorized off the driver roster rather than an
@@ -654,8 +658,10 @@ def sms_webhook():
 
         else:
             from functions.send_admin_summary import (
+                ADMIN_RESET_KEYWORDS,
                 ADMIN_SUMMARY_KEYWORDS,
                 build_admin_reply,
+                build_reset_reply,
                 is_admin_phone,
             )
 
@@ -723,6 +729,27 @@ def sms_webhook():
 
                     return (
                         f"<Response><Message>{escape(summary)}</Message></Response>",
+                        200,
+                        {"Content-Type": "text/xml"},
+                    )
+
+            elif body in ADMIN_RESET_KEYWORDS:
+                if not is_admin_phone(normalized):
+                    # Same silence as an unauthorized UPDATE: no reason
+                    # to tell an unknown number that the keyword exists.
+                    logger.warning(
+                        "Ignoring %s keyword from non-admin number %s.",
+                        body,
+                        normalized,
+                    )
+                else:
+                    reply = build_reset_reply(normalized)
+                    logger.info("Handled %s for admin %s.", body, normalized)
+
+                    from xml.sax.saxutils import escape
+
+                    return (
+                        f"<Response><Message>{escape(reply)}</Message></Response>",
                         200,
                         {"Content-Type": "text/xml"},
                     )

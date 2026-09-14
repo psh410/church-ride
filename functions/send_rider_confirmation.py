@@ -12,7 +12,9 @@
 #   - a recognized stop        -> confirmed for pickup, with the time
 #   - stop flagged "/driver"   -> shuttle was full, personal driver coming
 #   - an off-route address     -> not on a route, personal driver coming
-#   - stop flagged "/duplicate"-> nothing, they were already told
+#   - a repeat signup        -> "you're already signed up", with the
+#                              same details they were given the
+#                              first time, once per week
 #   - consent box unchecked    -> nothing, ever
 #
 # The last two are the ones to be careful about. Texting someone who
@@ -25,7 +27,11 @@ from __future__ import annotations
 
 import logging
 
-from db.firestore_client import record_rider_confirmed, was_rider_confirmed
+from db.firestore_client import (
+    get_rider_confirmation,
+    record_duplicate_notice_sent,
+    record_rider_confirmed,
+)
 from functions.read_riders_sheet import (
     get_next_sunday_date,
     get_signup_row,
@@ -76,12 +82,6 @@ def confirm_signup(row_number: int) -> dict:
             logger.info("Row %s (%r): no phone number on file.", row_number, name)
             return {"status": "skipped", "reason": "no phone number"}
 
-        if raw_stop.lower().endswith(DUPLICATE_FLAG):
-            logger.info(
-                "Row %s (%r): duplicate signup; already confirmed.", row_number, name
-            )
-            return {"status": "skipped", "reason": "duplicate signup"}
-
         try:
             normalized = normalize_to_e164(phone)
         except ValueError as exc:
@@ -90,27 +90,34 @@ def confirm_signup(row_number: int) -> dict:
 
         sunday_date = get_next_sunday_date()
 
-        # Belt and braces against a retried call or a second submission
-        # the Apps Script didn't catch.
+        # What this rider was already told this week decides what they
+        # get now. Fail open on the lookup: a Firestore hiccup shouldn't
+        # cost anyone their confirmation, and a duplicate text is much
+        # the cheaper mistake.
+        prior = None
         try:
-            if was_rider_confirmed(normalized, sunday_date):
-                logger.info(
-                    "Row %s (%r): already confirmed for %s.",
-                    row_number,
-                    name,
-                    sunday_date,
-                )
-                return {"status": "skipped", "reason": "already confirmed this week"}
+            prior = get_rider_confirmation(normalized, sunday_date)
         except RuntimeError as exc:
-            # Fail open on the lookup: a Firestore hiccup shouldn't cost
-            # a rider their confirmation. Worst case is a duplicate text.
             logger.warning(
-                "Row %s: could not check prior confirmation (%s); sending anyway.",
+                "Row %s: could not check prior confirmation (%s); "
+                "treating this as a first signup.",
                 row_number,
                 exc,
             )
 
-        message = build_confirmation_message(name, raw_stop)
+        if prior is not None:
+            return _answer_repeat_signup(
+                row_number, name, normalized, sunday_date, prior
+            )
+
+        # No prior record, so this is their first text even when the
+        # Apps Script flagged the row "/duplicate". That combination
+        # means the earlier submission left the consent box unchecked:
+        # they were never told anything, so tell them now. The flag is
+        # stripped first so the stop still resolves to a route.
+        stop = _strip_duplicate_flag(raw_stop)
+
+        message = build_confirmation_message(name, stop)
         if message is None:
             return {"status": "skipped", "reason": "no message for this signup"}
 
@@ -122,7 +129,7 @@ def confirm_signup(row_number: int) -> dict:
             record_rider_confirmed(
                 normalized,
                 sunday_date,
-                {"row": row_number, "stop": raw_stop, "name": name},
+                {"row": row_number, "stop": stop, "name": name},
             )
         except RuntimeError as exc:
             logger.warning("Row %s: confirmation sent but not recorded: %s", row_number, exc)
@@ -132,6 +139,111 @@ def confirm_signup(row_number: int) -> dict:
     except Exception as exc:
         logger.error("Rider confirmation failed for row %s: %s", row_number, exc)
         return {"status": "failed", "reason": str(exc)}
+
+
+def _answer_repeat_signup(
+    row_number: int, name: str, phone: str, sunday_date: str, prior: dict
+) -> dict:
+    """Reply to a rider who signed up again after already being confirmed.
+
+    Silence here is what makes people submit a third time, so they get
+    told they're already on the list, with the same details as the first
+    text. The details come from the stored record rather than the new
+    row: the new row carries a "/duplicate" flag that puts it outside
+    every shuttle list, so quoting it back would be wrong.
+
+    Args:
+        row_number: The row that triggered this call.
+        name: The rider's name as submitted.
+        phone: The rider's phone in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+        prior: The stored confirmation record.
+
+    Returns:
+        dict: Same shape as confirm_signup().
+    """
+    if prior.get("row") == row_number:
+        # The same row arriving twice is a retry, not a person signing
+        # up again. Nothing to say to them.
+        logger.info(
+            "Row %s (%r): already confirmed for %s.", row_number, name, sunday_date
+        )
+        return {"status": "skipped", "reason": "already confirmed this week"}
+
+    if prior.get("duplicate_notice_sent"):
+        # Capped at one per rider per week. Someone submitting five
+        # times has nothing new to learn from texts two through five.
+        logger.info(
+            "Row %s (%r): duplicate notice already sent for %s.",
+            row_number,
+            name,
+            sunday_date,
+        )
+        return {"status": "skipped", "reason": "duplicate notice already sent"}
+
+    message = build_duplicate_message(name, prior.get("stop") or "")
+
+    if not send_sms(phone, message):
+        logger.error("Row %s (%r): duplicate notice send failed.", row_number, name)
+        return {"status": "failed", "reason": "sms send failed"}
+
+    try:
+        record_duplicate_notice_sent(phone, sunday_date)
+    except RuntimeError as exc:
+        # Worth a warning but not a failure: the rider got the text.
+        # The only cost is that a third submission could repeat it.
+        logger.warning(
+            "Row %s: duplicate notice sent but not recorded: %s", row_number, exc
+        )
+
+    logger.info(
+        "Row %s (%r): duplicate notice sent for %s.", row_number, name, sunday_date
+    )
+    return {"status": "sent", "kind": "duplicate notice"}
+
+
+def build_duplicate_message(name: str, prior_stop: str) -> str:
+    """Build the "you're already signed up" text for a repeat signup.
+
+    Args:
+        name: The rider's name as submitted. Only the first word is used.
+        prior_stop: The stop stored when they were first confirmed,
+            flags included.
+
+    Returns:
+        str: The SMS body. Always a message, never None: a rider who
+            submitted twice has asked us a question either way.
+    """
+    first_name = _first_name(name)
+    stop = (prior_stop or "").strip()
+    lead = (
+        f"{BRAND_PREFIX} Hi {first_name}, you're already signed up for this Sunday."
+    )
+
+    if not stop:
+        # Nothing stored to quote back. Rare, but don't invent a stop.
+        return f"{lead} No need to submit again. {OPT_OUT_NOTICE}"
+
+    if stop.lower().endswith(CAPACITY_FLAG):
+        return (
+            f"{lead} The shuttle is full, so we're arranging a personal "
+            f"driver and will follow up. {OPT_OUT_NOTICE}"
+        )
+
+    if _lookup_shuttle_id(stop, get_stop_to_shuttle_map()) is None:
+        return (
+            f"{lead} Your address isn't on a shuttle route, so we're "
+            f"arranging a personal driver and will follow up. {OPT_OUT_NOTICE}"
+        )
+
+    pickup_time = _lookup_pickup_time(stop)
+    if not pickup_time:
+        return f"{lead} Your pickup is at {stop}. {OPT_OUT_NOTICE}"
+
+    return (
+        f"{lead} Pickup at {stop} at {pickup_time}, no need to submit "
+        f"again. {OPT_OUT_NOTICE}"
+    )
 
 
 def build_confirmation_message(name: str, raw_stop: str) -> str | None:
@@ -218,6 +330,14 @@ def send_rider_confirmation(name: str, phone: str, stop: str) -> dict:
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
+def _strip_duplicate_flag(stop: str) -> str:
+    """Return the stop with any trailing "/duplicate" removed."""
+    cleaned = (stop or "").strip()
+    if cleaned.lower().endswith(DUPLICATE_FLAG):
+        return cleaned[: -len(DUPLICATE_FLAG)].strip()
+    return cleaned
+
+
 def _first_name(name: str) -> str:
     """Return the rider's first name, or "there" if we don't have one."""
     cleaned = (name or "").strip()

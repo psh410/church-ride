@@ -19,6 +19,7 @@ from datetime import datetime
 
 from config import settings
 from db.firestore_client import (
+    clear_rider_confirmation,
     get_semester_schedule,
     record_disclosure_sent,
     was_disclosure_sent,
@@ -38,6 +39,13 @@ logger = logging.getLogger(__name__)
 # never behave like a normal keyword.
 ADMIN_SUMMARY_KEYWORDS = {"UPDATE", "STATUS"}
 
+# Clears the texting admin's OWN ride confirmation for the coming
+# Sunday, so a test signup from that number can be run again. It can
+# only ever affect the number it was texted from, and only from the
+# admin allowlist, so there's nothing here a rider could reach even
+# if they guessed the word.
+ADMIN_RESET_KEYWORDS = {"RESETME"}
+
 # Appended to a number's FIRST reply only. Texting UPDATE is itself the
 # opt-in (the admin initiated it), which makes that first reply the
 # initial message to them - the one place Twilio's policy actually
@@ -48,6 +56,48 @@ FIRST_CONTACT_DISCLOSURE = (
     f"Text UPDATE any time for current counts. "
     f"Msg & data rates may apply. {OPT_OUT_NOTICE}"
 )
+
+
+def build_reset_reply(phone: str) -> str:
+    """Clear this admin's own ride confirmation and report what happened.
+
+    Confirmations are deliberately capped at one per phone per Sunday,
+    which is correct in production and inconvenient while testing: the
+    second signup from a test phone is skipped, and it looks like a
+    broken feature rather than a working guard. This removes that
+    number's record so the next signup behaves like a first one.
+
+    Args:
+        phone: The sender's phone number, in any format
+            normalize_to_e164() accepts.
+
+    Returns:
+        str: The reply to send back.
+    """
+    try:
+        normalized = normalize_to_e164(phone)
+    except ValueError:
+        return f"{BRAND_PREFIX} Couldn't read that number. Nothing was cleared."
+
+    sunday_date = get_next_sunday_date()
+
+    try:
+        cleared = clear_rider_confirmation(normalized, sunday_date)
+    except RuntimeError as exc:
+        logger.error("RESETME failed for %s: %s", normalized, exc)
+        return f"{BRAND_PREFIX} Couldn't clear your confirmation just now."
+
+    if cleared:
+        logger.info("Cleared rider confirmation for %s (%s).", normalized, sunday_date)
+        return (
+            f"{BRAND_PREFIX} Cleared your ride confirmation for "
+            f"{sunday_date}. Sign up again to test."
+        )
+
+    return (
+        f"{BRAND_PREFIX} No ride confirmation on file for {sunday_date}. "
+        f"Nothing to clear."
+    )
 
 
 def is_admin_phone(phone: str) -> bool:

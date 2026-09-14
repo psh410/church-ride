@@ -618,6 +618,116 @@ def record_rider_confirmed(phone: str, sunday_date: str, details: Optional[dict]
         ) from exc
 
 
+def get_rider_confirmation(phone: str, sunday_date: str) -> Optional[dict]:
+    """Return the confirmation record for this phone and Sunday, if any.
+
+    Richer than was_rider_confirmed(): the caller needs the stored stop
+    and row so a repeat signup can be answered with the same details the
+    rider was originally given, rather than whatever the duplicate row
+    happens to say.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+
+    Returns:
+        dict or None: The stored record with its "details" flattened in,
+            or None if no confirmation has gone out.
+
+    Raises:
+        RuntimeError: If the lookup fails.
+    """
+    try:
+        doc = (
+            get_client()
+            .collection(RIDER_CONFIRMATIONS_COLLECTION)
+            .document(f"{phone}_{sunday_date}")
+            .get()
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read rider confirmation for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+    if not doc.exists:
+        return None
+
+    data = doc.to_dict() or {}
+    record = dict(data.get("details") or {})
+    record.update({k: v for k, v in data.items() if k != "details"})
+    return record
+
+
+def record_duplicate_notice_sent(phone: str, sunday_date: str) -> bool:
+    """Mark that the "you already signed up" text went out this week.
+
+    Caps that text at one per rider per Sunday. Someone who submits the
+    form five times should be told once, not five times.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+
+    Returns:
+        bool: True if the write succeeded.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    try:
+        get_client().collection(RIDER_CONFIRMATIONS_COLLECTION).document(
+            f"{phone}_{sunday_date}"
+        ).set(
+            {
+                "duplicate_notice_sent": True,
+                "duplicate_notice_at": firestore.SERVER_TIMESTAMP,
+            },
+            merge=True,
+        )
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record duplicate notice for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+def clear_rider_confirmation(phone: str, sunday_date: str) -> bool:
+    """Delete this phone's confirmation record for one Sunday.
+
+    Only used to make a signup testable again: with the record in place
+    the confirmation flow correctly refuses to text the same number
+    twice, which makes a repeat test look broken.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+
+    Returns:
+        bool: True if a record existed and was deleted, False if there
+            was nothing to delete.
+
+    Raises:
+        RuntimeError: If the delete fails.
+    """
+    try:
+        ref = (
+            get_client()
+            .collection(RIDER_CONFIRMATIONS_COLLECTION)
+            .document(f"{phone}_{sunday_date}")
+        )
+        if not ref.get().exists:
+            return False
+        ref.delete()
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to clear rider confirmation for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
