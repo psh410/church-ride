@@ -13,6 +13,12 @@ const ROUTES_TAB = "Routes";
 const SHUTTLES_TAB = "Shuttles";
 const RESPONSES_TAB = "Form Responses 1";
 
+// Signup confirmation text. The real secret lives in the live Apps
+// Script project and in Secret Manager, never in this repo copy.
+const CONFIRMATION_URL =
+  "https://church-rides-app-607355372763.us-central1.run.app/confirm-rider-signup";
+const CONFIRMATION_SECRET = "SET-IN-THE-LIVE-SCRIPT";
+
 function onFormSubmit(e) {
   try {
     const form = FormApp.getActiveForm();
@@ -70,13 +76,20 @@ function onFormSubmit(e) {
 
     if (isDuplicate) {
       appendFlagToAddress(sheet, row, thisStop, "duplicate");
+      sendSignupConfirmation(row);
       return;
     }
 
     // ── Check 2: Shuttle capacity ────────────────────────────────
     const stopToShuttle = getStopToShuttleMap(ss);
     const shuttleId = stopToShuttle[thisStop];
-    if (!shuttleId) return;
+    if (!shuttleId) {
+      // Off-route address. No shuttle, but they still get a text
+      // saying a personal driver is being arranged. This is roughly
+      // 40% of signups, so do NOT let this path return silently.
+      sendSignupConfirmation(row);
+      return;
+    }
 
     const currentShuttleCount = priorRowsThisWeek.filter(function (priorRow) {
       const priorStop = String(priorRow[CAMPUS_ADDRESS_COL - 1]).trim();
@@ -88,8 +101,31 @@ function onFormSubmit(e) {
     if (currentShuttleCount >= capacity) {
       appendFlagToAddress(sheet, row, thisStop, "driver");
     }
+
+    // Always last: the backend reads the flags off the row to decide
+    // which of the four messages to send, so the sheet must be written
+    // before this fires. Deciding who gets a text is the backend's job,
+    // not this script's - it is called on every path and may well
+    // answer "skipped".
+    sendSignupConfirmation(row);
   } catch (err) {
     console.error("onFormSubmit error: " + err.toString());
+  }
+}
+
+// ── Signup confirmation ─────────────────────────────────────────
+function sendSignupConfirmation(row) {
+  try {
+    const response = UrlFetchApp.fetch(CONFIRMATION_URL, {
+      method: "post",
+      contentType: "application/json",
+      payload: JSON.stringify({ row: row, secret: CONFIRMATION_SECRET }),
+      muteHttpExceptions: true,
+    });
+    console.log("Confirmation for row " + row + ": " + response.getContentText());
+  } catch (err) {
+    // Never let a texting problem break the flagging above.
+    console.error("Confirmation failed for row " + row + ": " + err);
   }
 }
 
