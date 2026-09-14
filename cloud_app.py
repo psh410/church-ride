@@ -4,7 +4,7 @@
 # driver assignment) instead of each job running as a separate Cloud
 # Function - this keeps all of them behind one deployed service.
 
-from flask import Flask, jsonify
+from flask import Flask, jsonify, redirect
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -25,6 +25,13 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
+# The canonical, carrier-facing compliance pages. These live on the
+# church website, not here, and they are what the approved A2P 10DLC
+# campaign registration points at. The /sms-terms and /privacy-policy
+# routes below redirect to them.
+SMS_TERMS_URL = "https://www.cfchome.org/sms-terms"
+PRIVACY_POLICY_URL = "https://www.cfchome.org/privacy-policy"
+
 
 @app.route("/health", methods=["GET"])
 def health() -> tuple:
@@ -38,156 +45,30 @@ def health() -> tuple:
 
 @app.route("/sms-terms", methods=["GET"])
 def sms_terms():
-    """Serve the SMS program terms and privacy policy page,
-    required for A2P 10DLC campaign compliance."""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>CFC Ride Coordination - SMS Terms & Privacy Policy</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body { font-family: -apple-system, sans-serif; 
-                   max-width: 700px; margin: 40px auto; 
-                   padding: 0 20px; line-height: 1.6; color: #333; }
-            h1 { font-size: 24px; }
-            h2 { font-size: 18px; margin-top: 30px; }
-            p { margin-bottom: 16px; }
-        </style>
-    </head>
-    <body>
-        <h1>Covenant Fellowship Church (CFC) - SMS Program Terms</h1>
+    """Redirect to the live SMS terms page on the church website.
 
-        <p>Last updated: September 2026</p>
+    This used to serve its own copy of the terms. That copy went stale:
+    it still told riders they opt in "by providing your mobile number"
+    and linked the retired Google Form, while the real flow is an
+    optional, unchecked-by-default consent checkbox on
+    cfchome.org/Ride-Sign-Up, and the approved A2P campaign points at
+    the cfchome.org pages.
 
-        <h2>Program Description</h2>
-        <p>By opting in, you agree to receive SMS ride notifications 
-        and reminders from Covenant Fellowship Church (CFC), 
-        including pickup confirmations, ride cancellations, driver 
-        assignment reminders, and pickup/dropoff status updates.</p>
-
-        <h2>Who Receives Messages</h2>
-        <p>Messages are sent only to people who have voluntarily 
-        provided their mobile number and opted in through the CFC 
-        ride signup form or driver availability form.</p>
-
-        <h2>Opt-In</h2>
-        <p>You opt in by providing your mobile number on the CFC 
-        ride signup or driver form at 
-        <a href="https://forms.gle/hszPoGWTaLr4t3U69">
-        https://forms.gle/hszPoGWTaLr4t3U69</a> and agreeing to 
-        receive SMS updates related to church rides.</p>
-
-        <h2>Message Frequency</h2>
-        <p>Message frequency varies, but you may receive up to 3 
-        messages per week during active shuttle service periods. 
-        Message and data rates may apply.</p>
-
-        <h2>Opt-Out</h2>
-        <p>You can opt out at any time by replying STOP to any 
-        message. You will receive a confirmation and will no longer 
-        receive messages from this program.</p>
-
-        <h2>Help</h2>
-        <p>For help, reply HELP to any message, or contact us at 
-        <a href="mailto:team@cfchome.org">team@cfchome.org</a>.</p>
-
-        <h2>Privacy</h2>
-        <p>See our 
-        <a href="/privacy-policy">Privacy Policy</a> 
-        for information on how we handle and protect your data.</p>
-
-        <h2>Contact Us</h2>
-        <p>Covenant Fellowship Church<br>
-        2906 Crossing Ct, Champaign, IL<br>
-        Email: <a href="mailto:team@cfchome.org">team@cfchome.org</a></p>
-    </body>
-    </html>
+    Redirecting rather than deleting on purpose. Inconsistent opt-in
+    URLs across the campaign fields and the terms pages were the root
+    cause of three campaign rejections, so any stale link still floating
+    around should land on the correct page rather than a 404.
     """
-    return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    return redirect(SMS_TERMS_URL, code=301)
 
 
 @app.route("/privacy-policy", methods=["GET"])
 def privacy_policy():
-    """Serve the dedicated Privacy Policy page, separate
-    from SMS terms, for A2P 10DLC campaign compliance
-    (reviewers require two distinct URLs)."""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Covenant Fellowship Church - Privacy Policy</title>
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <style>
-            body { font-family: -apple-system, sans-serif; 
-                   max-width: 700px; margin: 40px auto; 
-                   padding: 0 20px; line-height: 1.6; color: #333; }
-            h1 { font-size: 24px; }
-            h2 { font-size: 18px; margin-top: 30px; }
-            p { margin-bottom: 16px; }
-        </style>
-    </head>
-    <body>
-        <h1>Covenant Fellowship Church (CFC) - Privacy Policy</h1>
-        
-        <p>Last updated: September 2026</p>
+    """Redirect to the live privacy policy on the church website.
 
-        <h2>What Information We Collect</h2>
-        <p>Covenant Fellowship Church's Ride Coordination 
-        program collects your name, phone number, and email 
-        address when you voluntarily submit our ride signup 
-        or driver availability Google Form.</p>
-
-        <h2>How We Use Your Information</h2>
-        <p>We use your phone number solely to send SMS 
-        messages related to ride coordination, including 
-        pickup confirmations, ride cancellations, driver 
-        assignment reminders, and pickup/dropoff status 
-        updates. We do not use your information for 
-        marketing purposes.</p>
-
-        <h2>Message Frequency and Rates</h2>
-        <p>Message frequency varies, but you may receive up 
-        to 3 messages per week during active shuttle service 
-        periods. Message and data rates may apply.</p>
-
-        <h2>Data Sharing</h2>
-        <p>Your phone number and personal information will 
-        never be sold, rented, or shared with third parties 
-        for their marketing purposes. You will not receive 
-        third-party marketing messages through this program.</p>
-
-        <h2>Where Your Data Is Stored</h2>
-        <p>Your information is stored securely in Google 
-        Sheets and Google Cloud services used to operate the 
-        Ride Coordination Agent, and is accessed only by 
-        church ride coordinators and the automated systems 
-        that send these messages.</p>
-
-        <h2>Opting Out</h2>
-        <p>You can opt out of SMS messages at any time by 
-        replying STOP to any message. You will receive a 
-        confirmation and will no longer receive messages 
-        from this program. You may opt back in by texting 
-        START or by signing up again on our form.</p>
-
-        <h2>Getting Help</h2>
-        <p>For help, reply HELP to any message, or contact 
-        us directly at 
-        <a href="mailto:team@cfchome.org">team@cfchome.org</a>.</p>
-
-        <h2>Contact Us</h2>
-        <p>Covenant Fellowship Church<br>
-        2906 Crossing Ct, Champaign, IL<br>
-        Email: 
-        <a href="mailto:team@cfchome.org">team@cfchome.org</a></p>
-
-        <p><a href="/sms-terms">View SMS Program Terms</a></p>
-
-    </body>
-    </html>
+    See sms_terms() above for why this redirects instead of 404ing.
     """
-    return html, 200, {"Content-Type": "text/html"}
+    return redirect(PRIVACY_POLICY_URL, code=301)
 
 
 @app.route("/debug-settings", methods=["GET"])
