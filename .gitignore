@@ -1,5 +1,8 @@
-# Environment variables - never upload these
-.env
+# Environment variables - never upload these.
+# Glob, not a literal name: .env.bak sat here untracked for two days
+# holding live Twilio/Gmail/Anthropic credentials, and only luck kept
+# it out of a commit.
+.env*
 
 # Python
 __pycache__/
@@ -23,3 +26,5 @@ service-account-key.json
 
 # Cursor
 .cursor/
+# Scratch folder for files handed over from Claude sessions
+Claude outputs/

@@ -1,5 +1,5 @@
 venv/
-.env
+.env*
 .git/
 .gitignore
 __pycache__/
@@ -14,3 +14,5 @@ send_semester_schedule.sh
 send_driver_assignment.sh
 cron.log
 README.md
+Claude outputs/
+*.bak
