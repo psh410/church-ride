@@ -480,6 +480,86 @@ def preview_saturday_rider_reminder_route():
         return f"error: {exc}", 500, {"Content-Type": "text/plain"}
 
 
+@app.route("/debug-consent-column", methods=["GET"])
+def debug_consent_column_route():
+    """Report every consent-looking column and which one is actually read.
+
+    Built after a preview showed 28 of 28 riders with no SMS consent,
+    which is too clean to be behavior. The consent lookup matches a
+    header prefix and takes the first hit, so a second consent column
+    added later is invisible to it, and the failure is silent: everyone
+    simply reads as not consenting.
+
+    Reports the headers, which index the current logic picks, and how
+    many non-empty values each candidate column actually holds, so the
+    question is settled by data rather than by reading code. Optional
+    ?sunday=YYYY-MM-DD limits the counts to one signup window.
+    """
+    try:
+        from flask import request
+
+        from config import settings
+        from functions.read_riders_sheet import (
+            FORM_RESPONSES_TAB,
+            SMS_CONSENT_HEADER_PREFIX,
+            _cell,
+            _find_consent_index,
+        )
+        from functions.read_sheets import get_sheet_client
+
+        service = get_sheet_client()
+        rows = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
+            .execute()
+        ).get("values", [])
+
+        if not rows:
+            return "sheet is empty", 200, {"Content-Type": "text/plain"}
+
+        header = rows[0]
+        data = rows[1:]
+
+        def col_letter(i):
+            letters, i = "", i + 1
+            while i:
+                i, r = divmod(i - 1, 26)
+                letters = chr(65 + r) + letters
+            return letters
+
+        candidates = [
+            i for i, c in enumerate(header)
+            if str(c).strip().lower().startswith(SMS_CONSENT_HEADER_PREFIX)
+        ]
+        picked = _find_consent_index(header)
+
+        lines = ["HEADERS", "-------"]
+        for i, c in enumerate(header):
+            label = str(c).replace("\n", " ")[:70]
+            mark = "  <== CURRENTLY READ" if i == picked else ""
+            star = " *candidate*" if i in candidates else ""
+            lines.append(f"  [{i:2d}] {col_letter(i):>2}  {label}{star}{mark}")
+
+        lines += ["", "NON-EMPTY VALUES PER CANDIDATE COLUMN", "-" * 37]
+        if not candidates:
+            lines.append("  none - the prefix matches nothing, so nobody is ever texted")
+        for i in candidates:
+            filled = [_cell(r, i).strip() for r in data]
+            nonempty = [v for v in filled if v]
+            sample = sorted({v for v in nonempty})[:3]
+            lines.append(
+                f"  [{i:2d}] {col_letter(i):>2}  {len(nonempty):4d} of {len(data)} rows"
+                f"   sample values: {sample}"
+            )
+
+        lines += ["", f"rows of data: {len(data)}"]
+        return "\n".join(lines), 200, {"Content-Type": "text/plain"}
+    except Exception as exc:
+        logger.error("Consent column debug failed: %s", exc)
+        return f"error: {exc}", 500, {"Content-Type": "text/plain"}
+
+
 @app.route("/check-sheet-write", methods=["GET"])
 def check_sheet_write_route():
     """Report whether the service account can write to the rider sheet.
