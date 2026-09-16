@@ -7,6 +7,9 @@ from __future__ import annotations
 
 import logging
 import re
+
+import google.auth
+from googleapiclient.discovery import build
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -226,7 +229,9 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
     monday_label = _format_monday_date(week_monday)
 
     devotional: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
-    worship: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
+    worship: dict[str, dict] = {
+        key: {"name": None, "absent": False} for key, _ in SCHEDULE_DAYS
+    }
 
     try:
         devotional = _get_devotional_for_week(monday_label)
@@ -234,9 +239,9 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
         logger.error("Failed to read devotional rotation: %s", exc)
 
     try:
-        worship = _get_worship_for_week()
+        worship = _get_worship_for_week(week_monday)
     except Exception as exc:
-        logger.error("Failed to read worship directory: %s", exc)
+        logger.error("Failed to read worship schedule: %s", exc)
 
     try:
         absences = get_absent_names(week_monday)
@@ -247,13 +252,19 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
     schedule: dict[str, dict] = {}
     for key, _label in SCHEDULE_DAYS:
         dev_name = _clean_name(devotional.get(key))
-        worship_name = _clean_name(worship.get(key))
+        worship_day = worship.get(key) or {}
+        worship_name = _clean_name(worship_day.get("name"))
         schedule[key] = {
             "devotional": dev_name,
             "worship": worship_name,
             "theme": PRAYER_THEMES[key],
             "devotional_absent": _name_is_absent(dev_name, absences),
-            "worship_absent": _name_is_absent(worship_name, absences),
+            # Colour is the authority for worship: a covered day already
+            # names the substitute, so it is NOT an absence. Only the
+            # grey ABSENCE swatch, or an explicit comment naming them,
+            # marks the slot as uncovered.
+            "worship_absent": bool(worship_day.get("absent"))
+            or _name_is_absent(worship_name, absences),
         }
     return schedule
 
@@ -490,55 +501,223 @@ def _get_devotional_for_week(monday_label: str) -> dict[str, str | None]:
     }
 
 
-def _get_worship_for_week() -> dict[str, str | None]:
-    """Return Mon–Fri worship leaders from the directory columns.
+def _get_worship_for_week(week_monday: date) -> dict[str, dict]:
+    """Return Mon-Fri worship leaders for one week, read from cell colors.
 
-    The worship sheet's weekly rows are song titles, not people.
-    Leaders live in columns H–J (name, phone, days) and are a
-    standing weekday assignment (e.g. Ryan on Monday).
+    The sheet encodes the weekly assignment as colour, not text. Every
+    leader has a signature colour, visible on their own name cell in the
+    directory (columns H-J). A weekday column is normally tinted with
+    its regular leader's colour, and when somebody else covers, that
+    week's cell is tinted with the SUBSTITUTE's colour instead.
+
+    So the colour on a day cell is the assignment for that week, and the
+    directory's days column (J) is only the standing default.
+
+    This was invisible to the code until now, because everything else
+    here reads Sheets through the values API, which returns contents and
+    no formatting at all. The week of 9/14/2026 is the example: Monday
+    was tinted Kevin Kim's colour while Ryan recovered from surgery, and
+    Friday was tinted Albert Lee's for a four week stretch, and the
+    email announced Ryan and Andrew for both.
+
+    Args:
+        week_monday: Monday of the week being emailed.
+
+    Returns:
+        dict: {day_key: {"name": str | None, "absent": bool}}. absent is
+            True only when the cell carries the grey ABSENCE colour from
+            the legend, meaning nobody is covering; in that case the
+            standing leader is named so the reader knows who is out.
     """
-    rows = _worship_directory_rows()
-    directory: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
-    for row in rows:
-        name = _clean_name(_cell(row, 0))
-        raw_days = _cell(row, 2)
-        if not name or not raw_days or raw_days.lower() == "backup":
+    grid = _worship_grid()
+    directory = _worship_directory(grid)
+    colour_to_name = {
+        entry["colour"]: entry["name"]
+        for entry in directory
+        if entry["colour"]
+    }
+    absence_colour = _legend_colour(grid, "ABSENCE")
+
+    # The standing assignment, used when a cell has no usable colour.
+    standing: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
+    for entry in directory:
+        if entry["days"].strip().lower() == "backup":
             continue
-        for key in _parse_worship_days(raw_days):
-            directory[key] = name
-    return directory
+        for key in _parse_worship_days(entry["days"]):
+            if standing[key] is not None:
+                logger.warning(
+                    "Two standing worship leaders for %s (%s and %s); "
+                    "keeping the first.",
+                    key,
+                    standing[key],
+                    entry["name"],
+                )
+                continue
+            standing[key] = entry["name"]
+
+    row = _week_row(grid, week_monday - timedelta(days=1))
+
+    result: dict[str, dict] = {}
+    for offset, (key, _label) in enumerate(SCHEDULE_DAYS):
+        cell_colour = _cell_colour(row, offset + 1)  # B..F are the weekdays
+        default = standing.get(key)
+
+        if absence_colour and cell_colour == absence_colour:
+            result[key] = {"name": default, "absent": True}
+            continue
+
+        name = colour_to_name.get(cell_colour) if cell_colour else None
+        if name is None:
+            # No colour, or a colour belonging to nobody in the
+            # directory. Fall back rather than dropping the day, and say
+            # so, since an unrecognised colour usually means a leader
+            # was added without a directory row.
+            if cell_colour and cell_colour not in (None, _WHITE_HEX):
+                logger.warning(
+                    "Worship cell for %s is %s, which matches no leader; "
+                    "using the standing assignment %r.",
+                    key,
+                    cell_colour,
+                    default,
+                )
+            name = default
+
+        result[key] = {"name": name, "absent": False}
+
+    return result
 
 
-def _worship_directory_rows() -> list[list]:
-    """Read H:J from the current worship tab, falling back to last year."""
+_WHITE_HEX = "#FFFFFF"
+
+# Names in the directory's days column that are not weekday assignments.
+_NON_DAY_DIRECTORY_VALUES = {"backup"}
+
+
+def _worship_grid() -> list[dict]:
+    """Read the worship tab once, WITH cell formatting, falling back a year.
+
+    One grid call serves the directory, the weekly colours and the
+    comments column. The previous code made a separate values call for
+    each, inside a path that already has a Twilio-style latency budget
+    to respect.
+    """
+    service = _sheets_grid_client()
     last_error = None
     for tab in (WORSHIP_TAB, WORSHIP_TAB_FALLBACK):
         try:
-            return get_sheet_range(WORSHIP_SHEET_ID, f"'{tab}'!H:J")
+            result = (
+                service.spreadsheets()
+                .get(
+                    spreadsheetId=WORSHIP_SHEET_ID,
+                    ranges=[f"'{tab}'!A1:L200"],
+                    includeGridData=True,
+                )
+                .execute()
+            )
+            return result["sheets"][0]["data"][0].get("rowData", [])
         except Exception as exc:
             last_error = exc
-            logger.warning("Worship directory tab %r failed: %s", tab, exc)
-    raise RuntimeError(f"Failed to read worship directory: {last_error}")
+            logger.warning("Worship tab %r failed: %s", tab, exc)
+    raise RuntimeError(f"Failed to read worship sheet: {last_error}")
+
+
+def _sheets_grid_client():
+    """A Sheets client for the grid API, which returns formatting.
+
+    Separate from read_sheets.get_sheet_client() only because that one
+    is shared by every values read in the project; this needs the same
+    read-only scope but a distinct call.
+    """
+    global _grid_service
+    if _grid_service is None:
+        try:
+            credentials, _ = google.auth.default(
+                scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+            )
+            _grid_service = build("sheets", "v4", credentials=credentials)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to initialize Sheets grid client: {exc}") from exc
+    return _grid_service
+
+
+_grid_service = None
+
+
+def _cell_value(row: dict | None, index: int) -> str:
+    cells = (row or {}).get("values") or []
+    if index >= len(cells):
+        return ""
+    return str((cells[index] or {}).get("formattedValue", "")).strip()
+
+
+def _cell_colour(row: dict | None, index: int) -> str | None:
+    """Background colour of one cell as an uppercase hex string.
+
+    Google omits channels that are at full value, so an unset background
+    arrives as {} and has to be read as white rather than as black.
+    """
+    cells = (row or {}).get("values") or []
+    if index >= len(cells):
+        return None
+    fmt = (cells[index] or {}).get("effectiveFormat") or {}
+    background = fmt.get("backgroundColor")
+    if background is None:
+        return None
+    channels = (
+        background.get("red", 1.0),
+        background.get("green", 1.0),
+        background.get("blue", 1.0),
+    )
+    return "#" + "".join(f"{int(round(c * 255)):02X}" for c in channels)
+
+
+def _worship_directory(grid: list[dict]) -> list[dict]:
+    """Leaders from columns H-J, each with the colour of their name cell.
+
+    A directory row is one with BOTH a name in H and something in J.
+    That is what separates real entries from the legend block lower
+    down, where "ABSENCE" sits in H with J empty.
+    """
+    entries = []
+    for row in grid:
+        name = _clean_name(_cell_value(row, 7))
+        days = _cell_value(row, 9)
+        if not name or not days:
+            continue
+        entries.append(
+            {"name": name, "days": days, "colour": _cell_colour(row, 7)}
+        )
+    return entries
+
+
+def _legend_colour(grid: list[dict], label: str) -> str | None:
+    """The colour of a legend swatch, looked up by its own text.
+
+    Read from the sheet rather than hardcoded, so recolouring the legend
+    keeps working and nobody has to find a hex constant buried in here.
+    """
+    wanted = label.strip().lower()
+    for row in grid:
+        for index in (7, 8, 1):
+            if _cell_value(row, index).strip().lower() == wanted:
+                return _cell_colour(row, index)
+    return None
+
+
+def _week_row(grid: list[dict], week_sunday: date) -> dict | None:
+    """The weekly row whose column A date matches this Sunday."""
+    target = _normalize_sheet_date(week_sunday)
+    for row in grid:
+        if _normalize_sheet_date(_cell_value(row, 0)) == target:
+            return row
+    logger.warning("No worship row found for week of %s.", week_sunday)
+    return None
 
 
 def _worship_week_comment(week_monday: date) -> str:
-    """Return the Comments cell for the worship week of this Sunday."""
-    week_sunday = week_monday - timedelta(days=1)
-    last_error = None
-    for tab in (WORSHIP_TAB, WORSHIP_TAB_FALLBACK):
-        try:
-            rows = get_sheet_range(WORSHIP_SHEET_ID, f"'{tab}'!A:G")
-        except Exception as exc:
-            last_error = exc
-            continue
-        target = _normalize_sheet_date(week_sunday)
-        for row in rows:
-            if _normalize_sheet_date(_cell(row, 0)) == target:
-                return _cell(row, 6)
-        return ""
-    if last_error:
-        raise RuntimeError(f"Failed to read worship week rows: {last_error}")
-    return ""
+    """Return the Comments cell (column G) for this week's worship row."""
+    row = _week_row(_worship_grid(), week_monday - timedelta(days=1))
+    return _cell_value(row, 6)
 
 
 def _absences_from_servants_rows(rows: list[list]) -> set[str]:
@@ -754,41 +933,84 @@ def _name_tokens(name: str) -> set[str]:
 
 
 def _parse_worship_days(raw: str) -> list[str]:
-    """Parse a directory day cell like "Tues, Thurs" into Mon/Tue keys."""
+    """Parse a directory day cell like "Tues, Thurs" into Mon/Tue keys.
+
+    Splits on commas, slashes, ampersands, "and", and plain whitespace,
+    and matches a token by its first three letters. The old version
+    looked each token up in an exact abbreviation table split on commas
+    only, so "Monday", "Mon/Wed" and "Mon & Wed" all matched nothing and
+    that leader silently vanished from the schedule with no error.
+    """
     days: list[str] = []
-    for token in raw.split(","):
-        key = _DAY_ABBREVIATIONS.get(token.strip().rstrip(".").lower())
+    for token in re.split(r"[,/&+;]|\band\b|\s+", raw.lower()):
+        token = token.strip().rstrip(".")
+        if len(token) < 3:
+            continue
+        key = _DAY_ABBREVIATIONS.get(token[:3])
         if key and key not in days:
             days.append(key)
     return days
 
 
 def _schedule_table(schedule_dict: dict) -> str:
-    """Build a space-aligned plain-text schedule table."""
-    lines = [
-        f"{'Day':<11}{'Devotional':<17}{'Worship':<17}Prayer Theme",
-        f"{'------':<11}{'--------':<17}{'-------':<17}-----",
-    ]
+    """Build a space-aligned plain-text schedule table.
+
+    Column widths are measured from the content rather than fixed. The
+    fixed widths used to run cells together whenever one overflowed:
+    "Ryan Bielak (absent)" is twenty characters in a seventeen character
+    column, so it printed as "Ryan Bielak (absent)Sunday Sermon
+    Reflection" with no gap at all. A slot reading "(Backup)" makes that
+    worse, not better.
+    """
+    rows = []
     for key, label in SCHEDULE_DAYS:
         day = schedule_dict.get(key) or {}
-        devotional = _render_name(
-            day.get("devotional"),
-            bool(day.get("devotional_absent")),
+        rows.append(
+            (
+                label,
+                _render_name(
+                    day.get("devotional"), bool(day.get("devotional_absent"))
+                ),
+                _render_name(day.get("worship"), bool(day.get("worship_absent"))),
+                day.get("theme") or PRAYER_THEMES[key],
+            )
         )
-        worship = _render_name(
-            day.get("worship"),
-            bool(day.get("worship_absent")),
-        )
-        theme = day.get("theme") or PRAYER_THEMES[key]
-        lines.append(f"{label:<11}{devotional:<17}{worship:<17}{theme}")
-    return "\n".join(lines)
+
+    headers = ("Day", "Devotional", "Worship", "Prayer Theme")
+    # Two spaces of breathing room, and the last column never pads.
+    widths = [
+        max(len(headers[i]), max(len(row[i]) for row in rows)) + 2
+        for i in range(3)
+    ]
+
+    def line(cells):
+        return (
+            "".join(f"{cells[i]:<{widths[i]}}" for i in range(3)) + cells[3]
+        ).rstrip()
+
+    return "\n".join(
+        [
+            line(headers),
+            line(tuple("-" * len(h) for h in headers)),
+            *(line(row) for row in rows),
+        ]
+    )
 
 
 def _render_name(name: str | None, is_absent: bool) -> str:
+    """One schedule cell.
+
+    An absent worship leader is named rather than hidden, with Backup in
+    place of a substitute, because the sheet names two backups and
+    picking one would invent an assignment nobody made. A day that IS
+    covered never reaches here as absent: the covering leader's own
+    colour on that cell is what _get_worship_for_week reads, so their
+    name is simply printed as normal.
+    """
     if not name:
-        return "—"
+        return "—" if not is_absent else "Backup"
     if is_absent:
-        return f"{name} (absent)"
+        return f"{name} out - Backup"
     return name
 
 

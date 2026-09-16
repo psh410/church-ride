@@ -110,6 +110,207 @@ def test_a_naive_datetime_is_read_as_chicago():
 
 
 # --------------------------------------------------------------------------
+# Worship assignment, which lives in cell colour
+# --------------------------------------------------------------------------
+# The sheet encodes who leads each day as a background colour, not as
+# text. Every leader has a signature colour, shown on their own name
+# cell in the directory. A weekday column is normally tinted with its
+# regular leader's colour; when somebody covers, that week's cell is
+# tinted with the SUBSTITUTE's colour.
+#
+# None of this was visible to the code, because every other Sheets read
+# in this project uses the values API, which returns contents and no
+# formatting whatsoever. Week of 9/14/2026: Monday was tinted Kevin
+# Kim's colour while Ryan recovered from surgery and Friday was tinted
+# Albert Lee's, and the email announced Ryan and Andrew.
+
+RYAN = "#FCE5CD"
+KEVIN = "#CFE2F3"
+JAMES = "#D9D2E9"
+ANDREW = "#F4CCCC"
+ALBERT = "#EA9999"
+GREY = "#B7B7B7"
+
+
+def _hex_to_channels(value):
+    value = value.lstrip("#")
+    return {
+        "red": int(value[0:2], 16) / 255,
+        "green": int(value[2:4], 16) / 255,
+        "blue": int(value[4:6], 16) / 255,
+    }
+
+
+def _cell(value="", colour=None):
+    cell = {"formattedValue": value} if value else {}
+    if colour:
+        cell["effectiveFormat"] = {"backgroundColor": _hex_to_channels(colour)}
+    return cell
+
+
+def _row(*cells):
+    return {"values": list(cells)}
+
+
+def _grid(day_colours, week_date="9/13/2026"):
+    """A miniature worship tab: directory, legend, and one weekly row."""
+    blank = _cell()
+    directory = [
+        ("Ryan Bielak", RYAN, "Mon"),
+        ("Kevin Kim", KEVIN, "Tues, Thurs"),
+        ("James Park", JAMES, "Wed"),
+        ("Andrew Cheun", ANDREW, "Fri"),
+        ("Albert Lee", ALBERT, "Backup"),
+    ]
+    rows = []
+    # The weekly row: A=date, B-F=weekdays, G=comments, H-J=directory.
+    week_cells = [_cell(week_date)]
+    week_cells += [_cell("song", colour) for colour in day_colours]
+    week_cells += [blank]
+    name, colour, days = directory[0]
+    week_cells += [_cell(name, colour), _cell("555"), _cell(days)]
+    rows.append(_row(*week_cells))
+
+    for name, colour, days in directory[1:]:
+        rows.append(
+            _row(blank, blank, blank, blank, blank, blank, blank,
+                 _cell(name, colour), _cell("555"), _cell(days))
+        )
+    # The legend block: a label in H with NOTHING in J, which is what
+    # separates it from a real directory entry.
+    rows.append(
+        _row(blank, blank, blank, blank, blank, blank, blank, _cell("ABSENCE", GREY))
+    )
+    return rows
+
+
+def _worship_for(day_colours, week_date="9/13/2026"):
+    from datetime import date as _date
+
+    with mock.patch.object(mp, "_worship_grid", return_value=_grid(day_colours, week_date)):
+        return mp._get_worship_for_week(_date(2026, 9, 14))
+
+
+def test_a_normal_week_uses_the_standing_leaders():
+    got = _worship_for([RYAN, KEVIN, JAMES, KEVIN, ANDREW])
+    check(got["Mon"]["name"] == "Ryan Bielak", f"Monday: {got['Mon']}")
+    check(got["Tue"]["name"] == "Kevin Kim", f"Tuesday: {got['Tue']}")
+    check(got["Wed"]["name"] == "James Park", f"Wednesday: {got['Wed']}")
+    check(got["Fri"]["name"] == "Andrew Cheun", f"Friday: {got['Fri']}")
+    check(not any(d["absent"] for d in got.values()), "nobody should be absent")
+
+
+def test_a_covered_day_names_the_substitute():
+    # The real week of 9/14/2026: Kevin covers Monday, Albert covers Friday.
+    got = _worship_for([KEVIN, KEVIN, JAMES, KEVIN, ALBERT])
+    check(got["Mon"]["name"] == "Kevin Kim",
+          f"Monday should be the covering leader, got {got['Mon']}")
+    check(got["Fri"]["name"] == "Albert Lee",
+          f"Friday should be the covering leader, got {got['Fri']}")
+    check(not got["Mon"]["absent"],
+          "a covered day is not an absence, somebody is leading it")
+
+
+def test_a_backup_can_cover_even_though_they_have_no_standing_day():
+    # Albert's days cell reads "Backup", so he is in no standing slot.
+    # Colour still has to be able to put him on a day.
+    got = _worship_for([ALBERT, KEVIN, JAMES, KEVIN, ANDREW])
+    check(got["Mon"]["name"] == "Albert Lee", f"Monday: {got['Mon']}")
+
+
+def test_the_grey_absence_colour_asks_for_a_backup():
+    got = _worship_for([GREY, KEVIN, JAMES, KEVIN, ANDREW])
+    check(got["Mon"]["absent"], "the grey swatch should mark the day absent")
+    check(got["Mon"]["name"] == "Ryan Bielak",
+          "the standing leader is still named, so the reader knows who is out")
+    rendered = mp._render_name(got["Mon"]["name"], got["Mon"]["absent"])
+    check("Backup" in rendered, f"an absent slot should ask for Backup: {rendered!r}")
+
+
+def test_an_uncoloured_cell_falls_back_to_the_standing_leader():
+    got = _worship_for([None, KEVIN, JAMES, KEVIN, ANDREW])
+    check(got["Mon"]["name"] == "Ryan Bielak",
+          f"no colour should mean business as usual, got {got['Mon']}")
+
+
+def test_an_unknown_colour_falls_back_rather_than_dropping_the_day():
+    got = _worship_for(["#123456", KEVIN, JAMES, KEVIN, ANDREW])
+    check(got["Mon"]["name"] == "Ryan Bielak",
+          f"an unrecognised colour should not blank the day, got {got['Mon']}")
+
+
+def test_a_missing_week_row_still_produces_a_schedule():
+    got = _worship_for([RYAN, KEVIN, JAMES, KEVIN, ANDREW], week_date="1/1/2030")
+    check(got["Tue"]["name"] == "Kevin Kim",
+          f"a missing row should fall back to standing, got {got['Tue']}")
+
+
+def test_the_legend_is_not_read_as_a_person():
+    grid = _grid([RYAN, KEVIN, JAMES, KEVIN, ANDREW])
+    names = [entry["name"] for entry in mp._worship_directory(grid)]
+    check("ABSENCE" not in names, f"the legend leaked into the directory: {names}")
+    check(len(names) == 5, f"expected 5 leaders, got {names}")
+
+
+def test_the_absence_colour_is_read_from_the_sheet_not_hardcoded():
+    grid = _grid([RYAN, KEVIN, JAMES, KEVIN, ANDREW])
+    check(mp._legend_colour(grid, "ABSENCE") == GREY,
+          "the ABSENCE swatch colour should come from the legend cell")
+
+
+# --------------------------------------------------------------------------
+# Day cell parsing
+# --------------------------------------------------------------------------
+def test_full_day_names_and_separators_all_parse():
+    # Every one of these silently matched NOTHING before, which removed
+    # that leader from the schedule with no error anywhere.
+    cases = {
+        "Mon": ["Mon"],
+        "Monday": ["Mon"],
+        "Tues, Thurs": ["Tue", "Thu"],
+        "Mon/Wed": ["Mon", "Wed"],
+        "Mon & Wed": ["Mon", "Wed"],
+        "Tuesday and Thursday": ["Tue", "Thu"],
+    }
+    for raw, expected in cases.items():
+        got = mp._parse_worship_days(raw)
+        check(got == expected, f"{raw!r} should parse to {expected}, got {got}")
+
+
+def test_backup_and_blanks_parse_to_no_days():
+    for raw in ("Backup", "—", "", "n/a"):
+        got = mp._parse_worship_days(raw)
+        check(got == [], f"{raw!r} should yield no days, got {got}")
+
+
+# --------------------------------------------------------------------------
+# Table layout
+# --------------------------------------------------------------------------
+def test_columns_never_run_together():
+    # "Ryan Bielak (absent)" overflowed a fixed 17-char column and
+    # printed straight into the theme with no space.
+    schedule = {
+        key: {
+            "devotional": "Dae-Woung",
+            "worship": "Ryan Bielak",
+            "theme": mp.PRAYER_THEMES[key],
+            "devotional_absent": False,
+            "worship_absent": True,
+        }
+        for key, _ in mp.SCHEDULE_DAYS
+    }
+    table = mp._schedule_table(schedule)
+    for line in table.splitlines()[2:]:
+        # Every cell is padded, so the theme is always preceded by at
+        # least two spaces no matter how long the worship cell got.
+        theme_start = line.index(mp.PRAYER_THEMES["Mon"][:7]) if "Sunday Serm" in line else None
+        if theme_start is not None:
+            check(line[theme_start - 2:theme_start] == "  ",
+                  f"the theme ran into the cell before it: {line!r}")
+        check("  " in line, f"columns should stay separated: {line!r}")
+
+
+# --------------------------------------------------------------------------
 # Identity
 # --------------------------------------------------------------------------
 def test_same_given_and_surname_is_the_same_person():
