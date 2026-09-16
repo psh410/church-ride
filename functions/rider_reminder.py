@@ -58,8 +58,6 @@ SKIP_KEYWORD = "SKIP"
 # "NO" texted for any reason at all would cancel someone's ride.
 SKIP_KEYWORDS = {SKIP_KEYWORD, "NORIDE", "OUT", "CANT"}
 
-SIGNUP_URL = "cfchome.org/Ride-Sign-Up"
-
 
 def build_skip_reply(phone: str, sunday_date: str | None = None) -> str | None:
     """Cancel this phone's ride for the coming Sunday and build the reply.
@@ -266,14 +264,16 @@ def send_saturday_rider_reminders(sunday_date: str | None = None) -> dict:
 def _cancel_confirmation(sunday_date: str) -> str:
     """The reply a rider gets for a successful or repeated cancellation.
 
-    Names the date so a rider who cancels the wrong week notices, and
-    points at the signup form so a change of mind doesn't need a phone
-    call. That recovery path is what makes accepting loose aliases like
-    OUT and CANT reasonable rather than reckless.
+    Names the date, so a rider who cancels the wrong week notices, and
+    says nothing else. No signup link: a bare URL in A2P traffic is a
+    common trigger for carrier spam filtering, and messages being
+    silently dropped would cost more than the link saves. A rider who
+    changes their mind signs up again the same way they did the first
+    time.
     """
     return (
         f"{BRAND_PREFIX} Ride cancelled for {_format_short_date(sunday_date)}. "
-        f"Changed your mind? Sign up again at {SIGNUP_URL}. {OPT_OUT_NOTICE}"
+        f"{OPT_OUT_NOTICE}"
     )
 
 

@@ -110,12 +110,27 @@ def test_reminder_omits_time_when_the_stop_has_none():
     check("None" not in msg, f"missing time should be omitted, not printed: {msg!r}")
 
 
-def test_cancel_confirmation_names_date_and_recovery_path():
+def test_cancel_confirmation_names_the_date_and_nothing_else():
     msg = rr._cancel_confirmation(SUNDAY)
     check("9/20/26" in msg, "confirmation should name the date cancelled")
-    check(rr.SIGNUP_URL in msg, "confirmation should say how to sign up again")
     check("STOP to opt out" in msg, "confirmation should carry the opt-out notice")
     check(len(msg) <= 160, f"confirmation should be one segment, got {len(msg)}")
+
+
+def test_no_message_carries_a_link():
+    # Bare URLs in A2P traffic are a common carrier spam-filter trigger,
+    # and a dropped message is worse than an inconvenient one. Checked
+    # across every rider-facing message, not just the cancellation, so a
+    # link can't quietly reappear in the reminder either.
+    messages = {
+        "cancel confirmation": rr._cancel_confirmation(SUNDAY),
+        "reminder": rr.build_rider_reminder("John Kim", "FAR", "9:05 AM", SUNDAY),
+    }
+    for label, msg in messages.items():
+        lowered = msg.lower()
+        for marker in ("http", "www.", ".com", ".org", ".net"):
+            check(marker not in lowered,
+                  f"{label} should carry no link, found {marker!r}: {msg!r}")
 
 
 # --------------------------------------------------------------------------
