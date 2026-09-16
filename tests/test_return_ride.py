@@ -272,6 +272,14 @@ def test_build_ride_reply_normal_request_gets_ack_with_opt_out():
     check(OPT_OUT_NOTICE in reply,
           "ack should carry the opt-out notice (may be a rider's first text)")
     check("on the list" in reply, "ack should confirm the request was recorded")
+
+    # The date tells the rider which day they were actually filed under,
+    # which is the only signal they get when a late Sunday text rolls
+    # into Monday under UTC. Compared against the same helper the reply
+    # uses so this doesn't break every time the year turns over.
+    today_label = return_ride_mod._format_short_date(return_ride_mod._today())
+    check(today_label in reply,
+          f"ack should name the date it filed under ({today_label}): {reply!r}")
     # Same message whether they're comfortably under capacity or over it -
     # no reason to tell someone by text whether they got a shuttle seat
     # or a personal driver before anyone has arranged one.

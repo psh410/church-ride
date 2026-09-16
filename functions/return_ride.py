@@ -67,7 +67,15 @@ FIRST_CONTACT_DISCLOSURE = (
 # past the shuttle capacity - there's no reason to tell someone by text
 # whether they got a shuttle seat or a personal driver before anyone has
 # actually arranged one.
-_RIDER_ACK = f"{BRAND_PREFIX}\nYou're on the list for\nthe return ride. {OPT_OUT_NOTICE}"
+# Carries the date rather than just "the return ride", so the rider can
+# see which day they actually landed on. Worth the extra characters
+# because of the UTC rollover described in _today(): a text sent late
+# Sunday evening Central files under Monday, and this line is the only
+# place the rider would ever notice that happened. Date format matches
+# build_requests_summary()'s so both messages read the same way.
+_RIDER_ACK_TEMPLATE = (
+    f"{BRAND_PREFIX}\nYou're on the list for the\nreturn ride {{date}}. {OPT_OUT_NOTICE}"
+)
 
 # Unlike every other keyword in this system, a bare "RIDE" with nothing
 # after it should not go silent: the rider is actively trying to use it
@@ -142,9 +150,14 @@ def build_ride_reply(phone: str, body: str) -> str:
     if raw_text is None:
         return _RIDE_FORMAT_HINT
 
+    # Read the date once and use it for both the write and the reply, so
+    # the rider is never told a different day than the one they were
+    # filed under, even across a midnight UTC boundary mid-request.
+    request_date = _today()
+
     try:
         result = record_return_ride_request(
-            phone, _today(), raw_text, settings.RETURN_SHUTTLE_CAPACITY
+            phone, request_date, raw_text, settings.RETURN_SHUTTLE_CAPACITY
         )
         logger.info(
             "Recorded return ride request from %s (position=%s, needs_driver=%s, is_new=%s).",
@@ -157,7 +170,7 @@ def build_ride_reply(phone: str, body: str) -> str:
         logger.error("Could not record return ride request from %s: %s", phone, exc)
         return _SAVE_FAILED_REPLY
 
-    return _RIDER_ACK
+    return _RIDER_ACK_TEMPLATE.format(date=_format_short_date(request_date))
 
 
 def build_requests_summary(sunday_date: str | None = None) -> str:
