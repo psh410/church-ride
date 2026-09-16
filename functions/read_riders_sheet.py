@@ -254,10 +254,21 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
             and "stop" set to whatever they typed in the Campus Address
             field.
 
+    Riders who have cancelled by texting SKIP are dropped here rather
+    than in each caller, so ROUTE, LIST, UPDATE, the admin summary and
+    the Sunday driver email all reflect a cancellation without any of
+    them knowing cancellations exist. If Firestore can't be reached the
+    filter is skipped rather than raised: a cancelled rider still
+    showing in a count is a much smaller problem than every count in the
+    system failing at once.
+
     Returns:
         list[dict]: One dict per valid signup, each with "name", "email"
             (or None), "phone", "stop", "shuttle_id" (str or None),
-            "grade", and "submitted_at" (ISO timestamp string).
+            "grade", "submitted_at" (ISO timestamp string), and
+            "sms_consent" (bool). Consent is read in this same pass so
+            the Saturday reminder job doesn't need a per-rider API call
+            to find out who it's allowed to text.
 
     Raises:
         RuntimeError: If sunday_date is invalid or the sheet can't be read.
@@ -283,6 +294,8 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
 
     if not rows:
         return []
+
+    consent_index = _find_consent_index(rows[0])
 
     riders = []
     for row in rows[1:]:  # row 0 is the header
@@ -316,10 +329,13 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
                 "shuttle_id": shuttle_id,
                 "grade": _cell(row, _GRADE_COL),
                 "submitted_at": submitted_at.isoformat(),
+                "sms_consent": bool(
+                    consent_index != -1 and _cell(row, consent_index).strip()
+                ),
             }
         )
 
-    return _deduplicate_riders(riders)
+    return _drop_cancelled(_deduplicate_riders(riders), sunday_date)
 
 
 # Header of the optional SMS consent checkbox on the signup form. Matched
@@ -380,20 +396,7 @@ def get_signup_row(row_number: int) -> dict | None:
         logger.warning("Signup row %s has no timestamp; ignoring.", row_number)
         return None
 
-    consent_index = -1
-    for index, cell in enumerate(header):
-        if str(cell).strip().lower().startswith(SMS_CONSENT_HEADER_PREFIX):
-            consent_index = index
-            break
-
-    if consent_index == -1:
-        # Fail closed: no consent column means we cannot prove anyone
-        # opted in, so nothing should be texted.
-        logger.error(
-            "No column starting with %r found in '%s'; treating as no consent.",
-            SMS_CONSENT_HEADER_PREFIX,
-            FORM_RESPONSES_TAB,
-        )
+    consent_index = _find_consent_index(header)
 
     return {
         "name": _cell(row, _NAME_COL),
@@ -694,6 +697,81 @@ def _parse_timestamp(raw: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def _find_consent_index(header: list[str]) -> int:
+    """Return the index of the SMS consent column, or -1 if it's absent.
+
+    Matched by prefix rather than exact text: see SMS_CONSENT_HEADER_PREFIX
+    for why the full header can't be relied on.
+
+    A missing column fails closed. Every caller treats -1 as "no consent
+    from anyone", so a renamed or deleted column stops all texting rather
+    than silently texting people who never agreed to it. That's loud and
+    recoverable; the other way round is neither.
+    """
+    for index, cell in enumerate(header):
+        if str(cell).strip().lower().startswith(SMS_CONSENT_HEADER_PREFIX):
+            return index
+
+    logger.error(
+        "No column starting with %r found in '%s'; treating as no consent.",
+        SMS_CONSENT_HEADER_PREFIX,
+        FORM_RESPONSES_TAB,
+    )
+    return -1
+
+
+def _drop_cancelled(riders: list[dict], sunday_date: str) -> list[dict]:
+    """Remove riders who cancelled this Sunday by texting SKIP.
+
+    Phone numbers are compared in E.164 form on both sides, since the
+    sheet holds whatever the rider typed into the form ("217-555-0100",
+    "(217) 555 0100") while a cancellation is keyed by the normalized
+    number Twilio reports.
+
+    Degrades rather than fails: if the cancellation lookup raises, every
+    rider is returned unfiltered and the problem is logged.
+    """
+    # Imported here rather than at module scope to keep this sheet reader
+    # importable without a Firestore client, which the tests rely on.
+    from db.firestore_client import get_cancelled_phones_for_sunday
+    from functions.send_sms import normalize_to_e164
+
+    try:
+        cancelled = get_cancelled_phones_for_sunday(sunday_date)
+    except RuntimeError as exc:
+        logger.error(
+            "Could not read cancellations for %s (%s); "
+            "returning every rider unfiltered.",
+            sunday_date,
+            exc,
+        )
+        return riders
+
+    if not cancelled:
+        return riders
+
+    kept = []
+    for rider in riders:
+        try:
+            phone = normalize_to_e164(rider.get("phone", ""))
+        except ValueError:
+            # An unparseable number can't have cancelled, since a
+            # cancellation only ever arrives from a real inbound text.
+            kept.append(rider)
+            continue
+
+        if phone in cancelled:
+            logger.info(
+                "Dropping %s from %s: cancelled via SKIP.",
+                rider.get("name", phone),
+                sunday_date,
+            )
+            continue
+        kept.append(rider)
+
+    return kept
 
 
 def _cell(row: list[str], index: int) -> str:

@@ -28,6 +28,7 @@ SMS_OPT_OUTS_COLLECTION = "sms_opt_outs"
 RIDER_CONFIRMATIONS_COLLECTION = "rider_confirmations"
 RETURN_RIDE_REQUESTS_COLLECTION = "return_ride_requests"
 RETURN_RIDE_COUNTS_COLLECTION = "return_ride_counts"
+RIDE_CANCELLATIONS_COLLECTION = "ride_cancellations"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -919,3 +920,100 @@ def _doc_to_dict(doc: firestore.DocumentSnapshot) -> dict:
     data = doc.to_dict() or {}
     data["id"] = doc.id
     return data
+
+
+# --------------------------------------------------------------------------
+# Ride cancellations (the SKIP keyword)
+# --------------------------------------------------------------------------
+# A rider who texts SKIP after the Saturday night reminder is recorded
+# here, keyed by the Sunday they cancelled and their phone number, the
+# same <date>_<phone> shape return_ride_requests uses.
+#
+# This is the authoritative record even once the sheet write lands. The
+# sheet is owned by someone outside this system and a write there can
+# fail for reasons we don't control, so a cancellation has to be durable
+# here first and reflected in the sheet second.
+
+
+def record_ride_cancellation(
+    phone: str, sunday_date: str, name: str = "", raw_text: str = ""
+) -> dict:
+    """Record that a rider cancelled their ride for a given Sunday.
+
+    Idempotent. A rider who texts SKIP twice is not an error and does
+    not produce a second record; the original cancellation time is kept,
+    since that's the moment the seat actually came free.
+
+    Args:
+        phone: The rider's phone number, E.164 preferred.
+        sunday_date: The Sunday being cancelled, ISO "YYYY-MM-DD".
+        name: The rider's name from the signup sheet, stored so an admin
+            reading the collection doesn't have to resolve a phone
+            number by hand.
+        raw_text: What the rider actually texted, kept because SKIP has
+            unadvertised aliases and it's useful to know which word
+            people really use.
+
+    Returns:
+        dict: {"is_new": bool} - False when this phone had already
+            cancelled this Sunday.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    doc_id = f"{sunday_date}_{phone}"
+    try:
+        client = get_client()
+        doc_ref = client.collection(RIDE_CANCELLATIONS_COLLECTION).document(doc_id)
+        existing = doc_ref.get()
+        if existing.exists:
+            return {"is_new": False}
+
+        doc_ref.set(
+            {
+                "phone": phone,
+                "date": sunday_date,
+                "name": name,
+                "raw_text": raw_text,
+                "sheet_updated": False,
+                "created_at": firestore.SERVER_TIMESTAMP,
+            }
+        )
+        return {"is_new": True}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record cancellation for phone={phone!r} "
+            f"date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+def get_cancelled_phones_for_sunday(sunday_date: str) -> set:
+    """Return the set of phone numbers that cancelled a given Sunday.
+
+    A set rather than a list because the only thing any caller does with
+    it is membership tests while filtering a rider list.
+
+    Args:
+        sunday_date: The Sunday to look up, ISO "YYYY-MM-DD".
+
+    Returns:
+        set[str]: Phone numbers exactly as they were recorded.
+
+    Raises:
+        RuntimeError: If the query fails. Callers filtering a rider list
+            should treat a failure as "nobody cancelled" and carry on -
+            showing a cancelled rider is a far smaller problem than
+            every ride count in the system failing at once.
+    """
+    try:
+        client = get_client()
+        docs = (
+            client.collection(RIDE_CANCELLATIONS_COLLECTION)
+            .where("date", "==", sunday_date)
+            .stream()
+        )
+        return {doc.to_dict().get("phone", "") for doc in docs} - {""}
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read cancellations for date={sunday_date!r}: {exc}"
+        ) from exc
