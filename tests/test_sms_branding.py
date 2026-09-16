@@ -39,7 +39,7 @@ from functions.send_sms import BRAND_PREFIX
 
 # The compliance-relevant substring, rather than a specific constant.
 # Driver messages close with DRIVER_CLOSING_NOTICE (which also advertises
-# the ROUTE and RIDERS keywords) and rider messages with
+# the ROUTE and LIST keywords) and rider messages with
 # OPT_OUT_NOTICE, so asserting one exact constant would break every time
 # either line is reworded. What actually has to hold is that the opt-out
 # instruction is present at all.

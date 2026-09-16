@@ -15,9 +15,12 @@ from functions.send_sms import BRAND_PREFIX, normalize_to_e164, send_sms
 # opt-out notice, rather than a second "Reply..." sentence. Adding it
 # keeps the reminder at two segments, so advertising the keywords is
 # free. Rider messages keep the plain OPT_OUT_NOTICE - riders have no
-# ROUTE or RIDERS access.
+# ROUTE or LIST access.
+#
+# LIST was RIDERS - renamed so it stops sharing a prefix with the RIDE
+# keyword riders use to request a return ride (functions/return_ride.py).
 DRIVER_CLOSING_NOTICE = (
-    "Reply ROUTE, RIDERS or SCHEDULE for details, HELP for help, "
+    "Reply ROUTE, LIST or SCHEDULE for details, HELP for help, "
     "STOP to opt out."
 )
 

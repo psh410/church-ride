@@ -26,6 +26,8 @@ RUN_LOGS_COLLECTION = "run_logs"
 SEMESTER_SCHEDULE_COLLECTION = "semester_schedule"
 SMS_OPT_OUTS_COLLECTION = "sms_opt_outs"
 RIDER_CONFIRMATIONS_COLLECTION = "rider_confirmations"
+RETURN_RIDE_REQUESTS_COLLECTION = "return_ride_requests"
+RETURN_RIDE_COUNTS_COLLECTION = "return_ride_counts"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -724,6 +726,176 @@ def clear_rider_confirmation(phone: str, sunday_date: str) -> bool:
     except Exception as exc:
         raise RuntimeError(
             f"Failed to clear rider confirmation for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+# --------------------------------------------------------------------------
+# RETURN RIDE REQUESTS
+# --------------------------------------------------------------------------
+# One document per (phone, date) in RETURN_RIDE_REQUESTS_COLLECTION,
+# written when someone texts RIDE after service to request a ride home
+# (see functions/return_ride.py). A second, one-document-per-date
+# collection, RETURN_RIDE_COUNTS_COLLECTION, holds just a running count.
+#
+# Keying both by date is also what makes the count reset every Sunday
+# with no separate cleanup job: next Sunday's date simply doesn't have a
+# counter document yet, so its first request starts at position 1
+# regardless of how last Sunday ended. Nothing carries over on purpose -
+# see test_each_date_gets_its_own_independent_counter in
+# tests/test_return_ride.py.
+#
+# Both are written together inside a single Firestore transaction so two
+# people texting RIDE within the same second still get distinct, correct
+# positions. Reading "how many are there so far" with a plain query and
+# then writing the new document separately would race: both requests
+# could read the same count before either write commits, and both get
+# assigned the same position - exactly the kind of bug that only shows
+# up on a live Sunday when the 28-seat boundary actually matters.
+def record_return_ride_request(
+    phone: str, sunday_date: str, raw_text: str, capacity: int
+) -> dict:
+    """Record a return ride request, or update one already on file.
+
+    A first request from a phone number for a given date is assigned
+    the next position in that day's count, and gets `needs_driver` set
+    based on whether that position is past `capacity`. A second request
+    from the same phone on the same date (a corrected address, a
+    resend) overwrites the stored text but keeps the position and
+    `needs_driver` value assigned the first time around - it does not
+    consume another slot.
+
+    Args:
+        phone: The requester's phone number, E.164 preferred.
+        sunday_date: The date the request was made, in ISO "YYYY-MM-DD"
+            form. This is the actual calendar date the text arrived on,
+            not necessarily a Sunday.
+        raw_text: Everything the rider typed after "RIDE ", stored as
+            is rather than parsed into separate name/address fields.
+        capacity: The shuttle seat capacity for the return trip
+            (settings.RETURN_SHUTTLE_CAPACITY). Passed in rather than
+            imported directly here so this stays testable without a
+            dependency on settings.
+
+    Returns:
+        dict: {"position": int, "needs_driver": bool, "is_new": bool}
+            reflecting this request's place in the day's count.
+
+    Raises:
+        RuntimeError: If the transaction fails.
+    """
+    try:
+        client = get_client()
+        doc_ref = client.collection(RETURN_RIDE_REQUESTS_COLLECTION).document(
+            f"{sunday_date}_{phone}"
+        )
+        counter_ref = client.collection(RETURN_RIDE_COUNTS_COLLECTION).document(
+            sunday_date
+        )
+
+        transaction = client.transaction()
+
+        @firestore.transactional
+        def _run(transaction: firestore.Transaction) -> dict:
+            return _apply_return_ride_request(
+                transaction, doc_ref, counter_ref, phone, sunday_date, raw_text, capacity
+            )
+
+        return _run(transaction)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to record return ride request for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+def _apply_return_ride_request(
+    transaction: Any,
+    doc_ref: Any,
+    counter_ref: Any,
+    phone: str,
+    sunday_date: str,
+    raw_text: str,
+    capacity: int,
+) -> dict:
+    """The actual read-then-write logic for record_return_ride_request().
+
+    Kept as a plain function, separate from the `@firestore.transactional`
+    wrapper above, so it can be unit tested against simple fake
+    `transaction`/`doc_ref`/`counter_ref` objects (see
+    tests/test_return_ride.py) without needing a live Firestore
+    transaction, which google-cloud-firestore's decorator can't fake
+    convincingly on its own.
+
+    All reads happen before any write, as Firestore transactions
+    require: first the request doc itself (is this phone already on
+    file for this date?), then the counter doc if it turns out to be a
+    new request.
+    """
+    existing = doc_ref.get(transaction=transaction)
+
+    if existing.exists:
+        data = existing.to_dict() or {}
+        transaction.update(
+            doc_ref,
+            {"raw_text": raw_text, "updated_at": firestore.SERVER_TIMESTAMP},
+        )
+        return {
+            "position": data.get("position", 0),
+            "needs_driver": bool(data.get("needs_driver", False)),
+            "is_new": False,
+        }
+
+    counter_doc = counter_ref.get(transaction=transaction)
+    current_count = (
+        (counter_doc.to_dict() or {}).get("count", 0) if counter_doc.exists else 0
+    )
+    position = current_count + 1
+    needs_driver = position > capacity
+
+    transaction.set(counter_ref, {"count": position}, merge=True)
+    transaction.set(
+        doc_ref,
+        {
+            "phone": phone,
+            "date": sunday_date,
+            "raw_text": raw_text,
+            "position": position,
+            "needs_driver": needs_driver,
+            "created_at": firestore.SERVER_TIMESTAMP,
+        },
+    )
+    return {"position": position, "needs_driver": needs_driver, "is_new": True}
+
+
+def get_return_ride_requests_for_date(sunday_date: str) -> list[dict]:
+    """Return every return ride request logged for a given date.
+
+    Args:
+        sunday_date: The date to fetch requests for, in ISO
+            "YYYY-MM-DD" form.
+
+    Returns:
+        list[dict]: Request documents (including their Firestore doc
+            "id"), sorted by "position" ascending. Sorted in Python
+            rather than with a Firestore order_by, so this doesn't need
+            a composite index on top of the equality filter. Empty list
+            if none are found.
+
+    Raises:
+        RuntimeError: If the query fails.
+    """
+    try:
+        client = get_client()
+        query = client.collection(RETURN_RIDE_REQUESTS_COLLECTION).where(
+            "date", "==", sunday_date
+        )
+        requests = [_doc_to_dict(doc) for doc in query.stream()]
+        requests.sort(key=lambda req: req.get("position", 0))
+        return requests
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to get return ride requests for "
             f"sunday_date={sunday_date!r}: {exc}"
         ) from exc
 

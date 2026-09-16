@@ -546,9 +546,9 @@ def confirm_rider_signup():
 
 @app.route("/sms-webhook", methods=["POST"])
 def sms_webhook():
-    """Handle incoming SMS from Twilio: opt-out, opt-in, and UPDATE.
+    """Handle incoming SMS from Twilio: opt-out, opt-in, and keywords.
 
-    Three kinds of inbound message matter here:
+    These kinds of inbound message matter here:
 
     - Opt-out keywords (STOP/STOPALL/UNSUBSCRIBE/CANCEL/END/QUIT).
       Twilio already blocks carrier-level delivery itself; we
@@ -567,10 +567,20 @@ def sms_webhook():
       ride confirmation for the coming Sunday so a test signup can be
       run again. Same allowlist as UPDATE, and it can only ever touch
       the number it was sent from.
-    - Driver lookup keywords (ROUTE/RIDERS). Replies with that driver's
-      stops and live rider counts, or their rider names, for the
-      upcoming Sunday. Authorized off the driver roster rather than an
-      allowlist, and only for a driver actually assigned that week.
+    - Driver lookup keywords (ROUTE/LIST/SCHEDULE). Replies with that
+      driver's stops and live rider counts, their rider names, or the
+      semester schedule, for the upcoming Sunday. Authorized off the
+      driver roster rather than an allowlist, and only for a driver
+      actually assigned that week. LIST was called RIDERS until the
+      RIDE keyword below made that prefix ambiguous.
+    - Return ride signup (RIDE <name> <dorm/address>). The one keyword
+      here open to anyone: no allowlist and no roster check, because
+      this is how riders say, in the minutes after service, that they
+      want a ride home. Always replies, so a rider never gets silence.
+    - Return ride count (REQUESTS). Replies with the live return
+      headcount and any names past shuttle capacity, so Dae and Sarah
+      can see whether personal drivers are needed. Same allowlist as
+      UPDATE.
 
     Always returns 200 with TwiML (empty unless we're replying) so
     Twilio doesn't retry.
@@ -670,6 +680,13 @@ def sms_webhook():
                 build_driver_lookup_reply,
             )
 
+            from functions.return_ride import (
+                REQUESTS_KEYWORDS,
+                build_requests_reply,
+                build_ride_reply,
+                matches_ride_keyword,
+            )
+
             if body in DRIVER_LOOKUP_KEYWORDS:
                 # Authorization comes from the driver roster itself: a
                 # number that isn't a driver gets nothing, and a driver
@@ -750,6 +767,63 @@ def sms_webhook():
 
                     return (
                         f"<Response><Message>{escape(reply)}</Message></Response>",
+                        200,
+                        {"Content-Type": "text/xml"},
+                    )
+
+            elif matches_ride_keyword(body):
+                # Open to anyone - no allowlist, no roster check. Matched
+                # as a whole word (see matches_ride_keyword) so a future
+                # keyword sharing this prefix isn't swallowed here.
+                try:
+                    reply = build_ride_reply(normalized, body)
+                except Exception as exc:
+                    logger.error(
+                        "Could not handle RIDE from %s: %s", normalized, exc
+                    )
+                    # Unlike the other keywords, never fall through to
+                    # silence: the rider is standing in the lobby
+                    # waiting to hear that it worked.
+                    reply = (
+                        "CFC Rides: couldn't save that just now. Please tell "
+                        "an usher you need a ride home."
+                    )
+
+                from xml.sax.saxutils import escape
+
+                logger.info("Handled RIDE request from %s.", normalized)
+                return (
+                    f"<Response><Message>{escape(reply)}</Message></Response>",
+                    200,
+                    {"Content-Type": "text/xml"},
+                )
+
+            elif body in REQUESTS_KEYWORDS:
+                if not is_admin_phone(normalized):
+                    # Same silence as an unauthorized UPDATE.
+                    logger.warning(
+                        "Ignoring %s keyword from non-admin number %s.",
+                        body,
+                        normalized,
+                    )
+                else:
+                    try:
+                        summary = build_requests_reply(normalized)
+                        logger.info(
+                            "Replied with return ride count to admin %s.",
+                            normalized,
+                        )
+                    except Exception as exc:
+                        logger.error("Could not build REQUESTS reply: %s", exc)
+                        summary = (
+                            "CFC Rides: couldn't pull the return counts just "
+                            "now. Please try again in a minute."
+                        )
+
+                    from xml.sax.saxutils import escape
+
+                    return (
+                        f"<Response><Message>{escape(summary)}</Message></Response>",
                         200,
                         {"Content-Type": "text/xml"},
                     )

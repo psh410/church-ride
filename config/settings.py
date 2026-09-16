@@ -88,6 +88,14 @@ MAX_ROUTES = 10
 # stored in Firestore per route (not hardcoded here) since they can change
 # week to week as drivers and their vehicle capacities vary.
 
+# Combined seat capacity of the shuttles making the Sunday return trip
+# (see functions/return_ride.py). A return ride request past this many
+# for a given day needs a personal driver instead of a shuttle seat.
+# Hardcoded rather than read dynamically the way morning shuttle
+# capacity is - revisit if return capacity starts flexing week to week
+# the same way.
+RETURN_SHUTTLE_CAPACITY = 28
+
 # Percentage-of-capacity checkpoints at which the monitor agent should raise
 # an alert (e.g. "50% of riders assigned").
 ALERT_THRESHOLDS = [25, 50, 75, 100]

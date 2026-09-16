@@ -1,9 +1,15 @@
 # On-demand route and rider lookups a driver requests by text.
 #
 # A driver assigned to drive this Sunday texts ROUTE and gets their
-# stops, times and live rider counts; RIDERS gets the names; SCHEDULE
+# stops, times and live rider counts; LIST gets the names; SCHEDULE
 # (or DUTY) gets their remaining assigned Sundays for the semester.
 # Handled by the /sms-webhook route in cloud_app.py.
+#
+# LIST was RIDERS until this keyword got renamed to stop colliding with
+# the RIDE keyword (see functions/return_ride.py). Full replace, no
+# alias: only the drivers actually assigned a given Sunday ever learn
+# the keyword at all, through that week's Friday reminder text, so
+# there's no wider audience relying on the old word.
 #
 # Why this exists when the Friday reminder already lists the stops:
 # signups keep arriving until Sunday 9am, so Friday's counts are stale
@@ -34,13 +40,13 @@ from functions.send_sms import BRAND_PREFIX
 logger = logging.getLogger(__name__)
 
 ROUTE_KEYWORDS = {"ROUTE"}
-RIDERS_KEYWORDS = {"RIDERS"}
+LIST_KEYWORDS = {"LIST"}
 SCHEDULE_KEYWORDS = {"SCHEDULE", "DUTY"}
-DRIVER_LOOKUP_KEYWORDS = ROUTE_KEYWORDS | RIDERS_KEYWORDS | SCHEDULE_KEYWORDS
+DRIVER_LOOKUP_KEYWORDS = ROUTE_KEYWORDS | LIST_KEYWORDS | SCHEDULE_KEYWORDS
 
 
 def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None = None) -> str | None:
-    """Build the ROUTE or RIDERS reply for whoever texted, if they're a driver.
+    """Build the ROUTE or LIST reply for whoever texted, if they're a driver.
 
     Args:
         phone: The sender's number, E.164 preferred.
@@ -106,7 +112,7 @@ def build_driver_lookup_reply(phone: str, keyword: str, sunday_date: str | None 
     shuttle_id = assignment["shuttle_id"]
     leg = assignment["leg"]
 
-    if keyword in RIDERS_KEYWORDS:
+    if keyword in LIST_KEYWORDS:
         return _build_riders_reply(shuttle_id, leg, sunday_date, short_date, routes)
     return _build_route_reply(shuttle_id, leg, sunday_date, short_date, routes)
 
