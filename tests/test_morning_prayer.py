@@ -1,4 +1,4 @@
-# Name matching for the Morning Prayer reminder.
+# The Morning Prayer reminder: which week it covers, and who it reaches.
 #
 # Run it directly, from the repo root:
 #
@@ -25,8 +25,10 @@
 from __future__ import annotations
 
 import sys
+from datetime import datetime, timedelta
 from pathlib import Path
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -51,6 +53,60 @@ ROSTER = {
     "Kristin Kim": "kristin@example.com",
     "Dae-Woung Kang": "dae@example.com",
 }
+
+
+CHICAGO = ZoneInfo("America/Chicago")
+
+
+# --------------------------------------------------------------------------
+# Which week the email covers
+# --------------------------------------------------------------------------
+# The bug that actually sent the wrong people. The job fires Saturday
+# 6pm Chicago (Cloud Scheduler "0 18 * * 6") but the code was written
+# for a Sunday 6pm run, so on a Saturday it walked back six days to the
+# previous Sunday. Every email described the week that had just ended.
+# The names were read correctly, just off the wrong row, which is why it
+# looked like wrong people rather than a broken job.
+def _monday_at(year, month, day, hour):
+    return mp.get_schedule_monday(
+        datetime(year, month, day, hour, 0, tzinfo=CHICAGO)
+    )
+
+
+def test_the_saturday_send_covers_the_week_ahead():
+    # Sat 9/12 6pm is the real firing time. The week it must describe is
+    # Mon 9/14 through Fri 9/18, not the one just finished.
+    got = _monday_at(2026, 9, 12, 18)
+    check(got.isoformat() == "2026-09-14",
+          f"Saturday's send should cover the following Monday, got {got}")
+
+
+def test_every_saturday_lands_two_days_out():
+    for day in (5, 12, 19, 26):
+        got = _monday_at(2026, 9, day, 18)
+        want = datetime(2026, 9, day).date() + timedelta(days=2)
+        check(got == want, f"Sat 9/{day} should give {want}, got {got}")
+
+
+def test_a_retry_later_in_the_week_stays_on_the_same_week():
+    # A rerun on Tuesday must not skip ahead to a week nobody has
+    # reached yet, and must not fall back to the one that has passed.
+    for day, hour, label in (
+        (13, 18, "Sunday"),
+        (14, 9, "Monday morning"),
+        (14, 15, "Monday afternoon"),
+        (15, 18, "Tuesday"),
+        (18, 18, "Friday"),
+    ):
+        got = _monday_at(2026, 9, day, hour)
+        check(got.isoformat() == "2026-09-14",
+              f"{label} should still target 2026-09-14, got {got}")
+
+
+def test_a_naive_datetime_is_read_as_chicago():
+    aware = mp.get_schedule_monday(datetime(2026, 9, 12, 18, 0, tzinfo=CHICAGO))
+    naive = mp.get_schedule_monday(datetime(2026, 9, 12, 18, 0))
+    check(aware == naive, f"naive should match aware, {naive} vs {aware}")
 
 
 # --------------------------------------------------------------------------
@@ -224,7 +280,7 @@ def main() -> int:
             print(f"  - {failure}")
         return 1
     print(f"Ran {_RAN} test functions.")
-    print("All Morning Prayer name matching tests passed.")
+    print("All Morning Prayer tests passed.")
     return 0
 
 

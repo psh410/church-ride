@@ -123,10 +123,25 @@ def get_sheet_range(spreadsheet_id: str, range_name: str) -> list[list]:
 def get_schedule_monday(now: datetime | None = None) -> date:
     """Return the Monday of the Morning Prayer week to email about.
 
-    The job is meant to run Sunday 6pm Chicago time and cover the
-    following Mon–Fri. If it runs after Monday morning (a retry later
-    in the week), the last Sunday is used so the current week's row
-    is still selected.
+    The job fires Saturday 6pm Chicago (Cloud Scheduler job
+    morning-prayer-reminder, "0 18 * * 6") and covers the Mon-Fri that
+    follows.
+
+    This used to be written for a Sunday 6pm run, and on a Saturday it
+    walked back six days to the previous Sunday. Every email described
+    the week that had just ended rather than the week ahead: the send on
+    Sat 9/12 covered Mon 9/7 through Fri 9/11. The names were read
+    correctly off the rotation sheet, just from the wrong row, which is
+    why it looked like the wrong people rather than like a broken job.
+
+    Runs outside the Saturday window are treated as retries:
+
+        Saturday          -> the Monday two days out (the send window)
+        Sunday            -> the Monday one day out (same upcoming week)
+        Monday before noon-> today, still that same week
+        Mon pm to Friday  -> the current week's Monday, so a late retry
+                             re-sends the week in progress rather than
+                             skipping ahead to one nobody has reached
 
     Args:
         now: Optional timezone-aware datetime for tests. Defaults to
@@ -142,17 +157,16 @@ def get_schedule_monday(now: datetime | None = None) -> date:
     else:
         now = now.astimezone(CHICAGO)
 
-    weekday = now.weekday()  # Monday=0 ... Sunday=6
-    if weekday == 6:
-        sunday = now.date()
-    elif weekday == 0 and now.hour < 12:
-        # Monday morning is still the Sunday-night send window.
-        sunday = now.date() - timedelta(days=1)
-    else:
-        days_since_sunday = (weekday + 1) % 7
-        sunday = now.date() - timedelta(days=days_since_sunday)
+    weekday = now.weekday()  # Monday=0 ... Saturday=5, Sunday=6
+    today = now.date()
 
-    return sunday + timedelta(days=1)
+    if weekday == 5:  # Saturday: the actual send window
+        return today + timedelta(days=2)
+    if weekday == 6:  # Sunday: still pointing at the same upcoming week
+        return today + timedelta(days=1)
+    if weekday == 0 and now.hour < 12:  # Monday morning, that week has begun
+        return today
+    return today - timedelta(days=weekday)
 
 
 def get_absent_names(week_monday: date) -> set[str]:
