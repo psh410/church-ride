@@ -218,7 +218,7 @@ def test_phone_matching_survives_sheet_formatting():
 # --------------------------------------------------------------------------
 # The Saturday send
 # --------------------------------------------------------------------------
-def _run_send(riders, opted_out=()):
+def _run_send(riders, opted_out=(), dry_run=False):
     sent = []
     with mock.patch.object(rr, "get_riders_for_sunday", return_value=riders), \
          mock.patch.object(rr, "get_stop_times_map", return_value={"FAR": "9:05 AM"}), \
@@ -226,8 +226,21 @@ def _run_send(riders, opted_out=()):
                            side_effect=lambda p: p in opted_out), \
          mock.patch.object(rr, "send_sms",
                            side_effect=lambda to, body: sent.append((to, body)) or True):
-        result = rr.send_saturday_rider_reminders(SUNDAY)
+        result = rr.send_saturday_rider_reminders(SUNDAY, dry_run=dry_run)
     return result, sent
+
+
+def test_dry_run_sends_absolutely_nothing():
+    # The safety catch on the preview endpoint. If this ever regresses,
+    # someone checking their wording texts every rider on the list.
+    riders = [_rider(name="A", phone="217-555-0100"),
+              _rider(name="B", phone="217-555-0200")]
+    result, sent = _run_send(riders, dry_run=True)
+    check(sent == [], f"dry run must send nothing, sent {len(sent)}")
+    check(result["status"] == "dry_run", f"status should say dry_run, got {result['status']}")
+    check(result["sent"] == 2, "dry run should still report who it would have texted")
+    check(any("WOULD SEND" in d for d in result["details"]),
+          "dry run details should show the message bodies")
 
 
 def test_only_consenting_riders_are_texted():

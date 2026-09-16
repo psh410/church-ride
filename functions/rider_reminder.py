@@ -180,7 +180,9 @@ def build_rider_reminder(
     )
 
 
-def send_saturday_rider_reminders(sunday_date: str | None = None) -> dict:
+def send_saturday_rider_reminders(
+    sunday_date: str | None = None, dry_run: bool = False
+) -> dict:
     """Text every consenting shuttle rider their pickup details.
 
     Skips riders with no SMS consent (the consent gate fails closed, so
@@ -191,6 +193,11 @@ def send_saturday_rider_reminders(sunday_date: str | None = None) -> dict:
         sunday_date: Optional ISO "YYYY-MM-DD" override. Defaults to the
             coming Sunday, which on a Saturday 9:30pm Central run is
             already "today" in UTC and so resolves correctly.
+        dry_run: If True, builds every message and works out who would
+            be skipped, but sends nothing. This exists because the only
+            other way to find out what this job does is to text every
+            rider on the list, which is not something anyone should do
+            to check their own wording.
 
     Returns:
         dict: {"status", "sunday_date", "sent", "skipped", "failed",
@@ -234,6 +241,11 @@ def send_saturday_rider_reminders(sunday_date: str | None = None) -> dict:
             sunday_date,
         )
 
+        if dry_run:
+            sent += 1
+            details.append(f"{name} ({phone}): WOULD SEND\n    {body}")
+            continue
+
         if send_sms(phone, body):
             sent += 1
             details.append(f"{name}: sent")
@@ -242,14 +254,15 @@ def send_saturday_rider_reminders(sunday_date: str | None = None) -> dict:
             details.append(f"{name}: send failed")
 
     logger.info(
-        "Saturday rider reminders for %s: %s sent, %s skipped, %s failed.",
+        "Saturday rider reminders for %s%s: %s sent, %s skipped, %s failed.",
+        " (DRY RUN)" if dry_run else "",
         sunday_date,
         sent,
         skipped,
         failed,
     )
     return {
-        "status": "success" if failed == 0 else "partial",
+        "status": "dry_run" if dry_run else ("success" if failed == 0 else "partial"),
         "sunday_date": sunday_date,
         "sent": sent,
         "skipped": skipped,

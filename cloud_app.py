@@ -450,6 +450,36 @@ def send_saturday_rider_reminder_route():
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@app.route("/preview-saturday-rider-reminder", methods=["GET"])
+def preview_saturday_rider_reminder_route():
+    """Show what the Saturday rider reminder would send, without sending.
+
+    The live endpoint texts every consenting rider on the list, so
+    without this the only way to check the wording or see who is being
+    skipped and why is to text thirty students. Mirrors
+    /preview-admin-summary. Optional ?sunday=YYYY-MM-DD.
+    """
+    try:
+        from flask import request
+
+        from functions.rider_reminder import send_saturday_rider_reminders
+
+        result = send_saturday_rider_reminders(
+            request.args.get("sunday"), dry_run=True
+        )
+
+        lines = [
+            f"DRY RUN for {result['sunday_date']} - nothing was sent.",
+            f"would send: {result['sent']}   skipped: {result['skipped']}",
+            "",
+        ]
+        lines.extend(result["details"])
+        return "\n".join(lines), 200, {"Content-Type": "text/plain"}
+    except Exception as exc:
+        logger.error("Saturday rider reminder preview failed: %s", exc)
+        return f"error: {exc}", 500, {"Content-Type": "text/plain"}
+
+
 @app.route("/check-sheet-write", methods=["GET"])
 def check_sheet_write_route():
     """Report whether the service account can write to the rider sheet.
