@@ -437,6 +437,37 @@ def send_driver_sms_reminder_route():
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+@app.route("/send-saturday-rider-reminder", methods=["POST"])
+def send_saturday_rider_reminder_route():
+    """Text this Sunday's shuttle riders their pickup details,
+    with the SKIP cancellation option."""
+    try:
+        from functions.rider_reminder import send_saturday_rider_reminders
+        result = send_saturday_rider_reminders()
+        return _scheduled_job_response(result)
+    except Exception as exc:
+        logger.error("Saturday rider reminder failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
+@app.route("/check-sheet-write", methods=["GET"])
+def check_sheet_write_route():
+    """Report whether the service account can write to the rider sheet.
+
+    Credentials, scope and the spreadsheet's own sharing settings are
+    three separate things and any one of them can be wrong. Without this
+    the first sign of a problem is a rider's cancellation silently not
+    reaching the sheet on a Saturday night. Writes a cell's existing
+    value back over itself, so it changes nothing.
+    """
+    try:
+        from functions.write_riders_sheet import check_write_access
+        return jsonify(check_write_access()), 200
+    except Exception as exc:
+        logger.error("Sheet write check failed: %s", exc)
+        return jsonify({"ok": False, "detail": str(exc)}), 500
+
+
 @app.route("/send-thursday-prayer-reminder", methods=["POST"])
 def send_thursday_prayer_reminder_route():
     """Send the Thursday night prayer meeting reminder to
@@ -581,6 +612,10 @@ def sms_webhook():
       headcount and any names past shuttle capacity, so Dae and Sarah
       can see whether personal drivers are needed. Same allowlist as
       UPDATE.
+    - Ride cancellation (SKIP, plus the unadvertised aliases NORIDE,
+      OUT and CANT). Answers the Saturday night reminder: gives up that
+      Sunday's seat, records it, and flags the signup row. Authorized by
+      having a signup, so a rider can only ever cancel their own seat.
 
     Always returns 200 with TwiML (empty unless we're replying) so
     Twilio doesn't retry.
@@ -686,6 +721,8 @@ def sms_webhook():
                 build_ride_reply,
                 matches_ride_keyword,
             )
+
+            from functions.rider_reminder import SKIP_KEYWORDS, build_skip_reply
 
             if body in DRIVER_LOOKUP_KEYWORDS:
                 # Authorization comes from the driver roster itself: a
@@ -824,6 +861,39 @@ def sms_webhook():
 
                     return (
                         f"<Response><Message>{escape(summary)}</Message></Response>",
+                        200,
+                        {"Content-Type": "text/xml"},
+                    )
+
+            elif body in SKIP_KEYWORDS:
+                # No allowlist and no roster check: authorization is
+                # simply having a signup for this Sunday, and a number
+                # without one gets the same silence as any other
+                # unauthorized keyword. A rider can only ever cancel
+                # their own seat, since the lookup is by the number the
+                # text arrived from.
+                try:
+                    reply = build_skip_reply(normalized)
+                except Exception as exc:
+                    logger.error(
+                        "Could not handle %s from %s: %s", body, normalized, exc
+                    )
+                    reply = (
+                        "CFC Rides: couldn't cancel that just now. Please try "
+                        "again in a minute."
+                    )
+
+                if reply is None:
+                    logger.info(
+                        "Ignoring %s from %s: no signup this Sunday.",
+                        body,
+                        normalized,
+                    )
+                else:
+                    from xml.sax.saxutils import escape
+
+                    return (
+                        f"<Response><Message>{escape(reply)}</Message></Response>",
                         200,
                         {"Content-Type": "text/xml"},
                     )

@@ -228,6 +228,7 @@ def test_no_keyword_overlaps_with_other_live_keywords():
         # from the module rather than hardcoded so the next keyword
         # added there is covered here for free.
         | summary_mod.ADMIN_RESET_KEYWORDS
+        | __import__("functions.rider_reminder", fromlist=["x"]).SKIP_KEYWORDS
         | {"STOP", "STOPALL", "UNSUBSCRIBE", "CANCEL", "END", "QUIT", "START", "YES", "HELP"}
     )
     overlap = other_keywords & return_ride_mod.REQUESTS_KEYWORDS

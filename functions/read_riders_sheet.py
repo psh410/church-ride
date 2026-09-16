@@ -234,7 +234,11 @@ def get_shuttle_capacities() -> dict:
     return _shuttle_capacities_cache
 
 
-def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -> list[dict]:
+def get_riders_for_sunday(
+    sunday_date: str,
+    include_non_shuttle: bool = False,
+    include_cancelled: bool = False,
+) -> list[dict]:
     """Return riders who signed up for a given Sunday.
 
     Reads every row of the "Form Responses 1" tab and keeps only rows
@@ -253,6 +257,12 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
             (e.g. "Other", or any free-text entry) get "shuttle_id": None
             and "stop" set to whatever they typed in the Campus Address
             field.
+        include_cancelled: If False (default), riders who cancelled by
+            texting SKIP are dropped. Pass True only when you need to
+            find a rider *because* they may have cancelled - the SKIP
+            handler does this, since looking someone up in the filtered
+            list would make a second SKIP find nobody and go silent,
+            leaving the rider thinking their cancellation failed.
 
     Riders who have cancelled by texting SKIP are dropped here rather
     than in each caller, so ROUTE, LIST, UPDATE, the admin summary and
@@ -335,7 +345,10 @@ def get_riders_for_sunday(sunday_date: str, include_non_shuttle: bool = False) -
             }
         )
 
-    return _drop_cancelled(_deduplicate_riders(riders), sunday_date)
+    deduplicated = _deduplicate_riders(riders)
+    if include_cancelled:
+        return deduplicated
+    return _drop_cancelled(deduplicated, sunday_date)
 
 
 # Header of the optional SMS consent checkbox on the signup form. Matched
@@ -697,6 +710,70 @@ def _parse_timestamp(raw: str) -> datetime | None:
         except ValueError:
             continue
     return None
+
+
+def find_signup_row_for_phone(phone: str, sunday_date: str) -> int | None:
+    """Return the 1-indexed sheet row of a phone's signup for a Sunday.
+
+    Needed because the sheet write that flags a cancellation addresses a
+    row by number, while everything inbound is keyed by phone number.
+
+    Compares in E.164 on both sides: the sheet holds whatever the rider
+    typed into the form while an inbound text arrives normalized. Later
+    rows win, so a rider who signed up twice has their most recent row
+    flagged, which is the one the confirmation referred to.
+
+    Args:
+        phone: The rider's phone number, E.164 preferred.
+        sunday_date: The Sunday to search, ISO "YYYY-MM-DD".
+
+    Returns:
+        int or None: The 1-indexed row number, or None when this phone
+            has no signup inside that Sunday's window.
+
+    Raises:
+        RuntimeError: If sunday_date is invalid or the sheet can't be read.
+    """
+    from functions.send_sms import normalize_to_e164
+
+    try:
+        target = normalize_to_e164(phone)
+    except ValueError:
+        return None
+
+    try:
+        window_start, window_end = _get_signup_window(sunday_date)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid sunday_date={sunday_date!r}: {exc}") from exc
+
+    try:
+        service = get_sheet_client()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
+            .execute()
+        )
+        rows = result.get("values", [])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read '{FORM_RESPONSES_TAB}' tab: {exc}"
+        ) from exc
+
+    found = None
+    for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
+        submitted_at = _parse_timestamp(_cell(row, _TIMESTAMP_COL))
+        if submitted_at is None:
+            continue
+        if not (window_start <= submitted_at <= window_end):
+            continue
+        try:
+            if normalize_to_e164(_cell(row, _PHONE_COL)) == target:
+                found = index
+        except ValueError:
+            continue
+
+    return found
 
 
 def _find_consent_index(header: list[str]) -> int:
