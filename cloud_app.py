@@ -492,12 +492,12 @@ def debug_consent_column_route():
 
     Reports the headers, which index the current logic picks, and how
     many non-empty values each candidate column actually holds, so the
-    question is settled by data rather than by reading code. Optional
-    ?sunday=YYYY-MM-DD limits the counts to one signup window.
+    question is settled by data rather than by reading code. Counts
+    cover the whole sheet, not one signup window, because a consent
+    column added partway through only has values in recent rows and
+    narrowing the range would hide exactly the signal being looked for.
     """
     try:
-        from flask import request
-
         from config import settings
         from functions.read_riders_sheet import (
             FORM_RESPONSES_TAB,
