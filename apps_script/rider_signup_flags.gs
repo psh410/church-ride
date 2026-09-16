@@ -65,7 +65,26 @@ function onFormSubmit(e) {
     }
 
     // ── Check 1: Duplicate ──────────────────────────────────────
+    // A prior row only makes this one a duplicate if that prior signup
+    // is still standing. Rows flagged "cancelled" are exactly the case
+    // where it is not: the rider gave up their seat by texting SKIP and
+    // is now signing up again on purpose. Treating that as a duplicate
+    // would drop them out of every shuttle list and text them that
+    // they're already signed up, leaving them with no ride and a
+    // message saying they have one.
+    //
+    // Rows already flagged "duplicate" are skipped for the same reason
+    // one step removed: if the original signup was cancelled, the
+    // duplicate of it is not a live signup either, and matching against
+    // it would recreate the bug through the back door. When the
+    // original IS still standing it is unflagged, so it still matches
+    // and repeat submissions are still caught.
     const isDuplicate = priorRowsThisWeek.some(function (priorRow) {
+      const priorFlags = rowFlags(priorRow[CAMPUS_ADDRESS_COL - 1]);
+      if (priorFlags.indexOf("cancelled") !== -1 ||
+          priorFlags.indexOf("duplicate") !== -1) {
+        return false;
+      }
       const priorEmail = normalizeEmail(priorRow[EMAIL_COL - 1]);
       const priorPhone = normalizePhone(priorRow[PHONE_COL - 1]);
       return (
@@ -91,10 +110,27 @@ function onFormSubmit(e) {
       return;
     }
 
+    // Count only rows actually occupying a shuttle seat, which means
+    // rows with no flag at all.
+    //
+    // This used to count every row whose address mapped to the shuttle,
+    // flags and all, which held seats that nobody was sitting in. A
+    // "cancelled" row kept a seat reserved for someone who had
+    // explicitly given it up, defeating the point of having a
+    // cancellation path. A "duplicate" row counted one person twice. A
+    // "driver" row counted someone who by definition did not get a
+    // shuttle seat.
+    //
+    // Known limitation: riders already flagged "driver" are not
+    // promoted when a seat frees up later. Re-flagging existing rows is
+    // a bigger change than this, and Dae and Sarah are arranging those
+    // rides by hand anyway. What this does guarantee is that the next
+    // person to sign up gets the freed seat instead of being turned
+    // away from an empty one.
     const currentShuttleCount = priorRowsThisWeek.filter(function (priorRow) {
+      if (hasKnownFlag(priorRow[CAMPUS_ADDRESS_COL - 1])) return false;
       const priorStop = String(priorRow[CAMPUS_ADDRESS_COL - 1]).trim();
-      const cleanStop = priorStop.split("/")[0].trim();
-      return stopToShuttle[cleanStop] === shuttleId;
+      return stopToShuttle[priorStop.split("/")[0].trim()] === shuttleId;
     }).length;
 
     const capacity = getShuttleCapacity(ss, shuttleId);
@@ -172,6 +208,39 @@ function getShuttleCapacity(ss, shuttleId) {
   }
   return 14;
 }
+
+// The complete flag vocabulary. Matched explicitly rather than treating
+// any "/" as a flag, because riders do type addresses containing
+// slashes ("1002 S Lincoln Apt 1/2") and a stray one must not be read
+// as a flag that quietly changes how their row is counted.
+const KNOWN_FLAGS = ["duplicate", "driver", "cancelled"];
+
+
+function hasKnownFlag(addressValue) {
+  const flags = rowFlags(addressValue);
+  for (let i = 0; i < flags.length; i++) {
+    if (KNOWN_FLAGS.indexOf(flags[i]) !== -1) return true;
+  }
+  return false;
+}
+
+
+function rowFlags(addressValue) {
+  // Return the flags appended to a campus address cell, lowercased.
+  // "FAR" -> [], "FAR/duplicate" -> ["duplicate"],
+  // "FAR/cancelled" -> ["cancelled"]. Written by this script
+  // (duplicate, driver) and by the backend's SKIP handler (cancelled),
+  // which writes to the sheet directly through the Sheets API rather
+  // than through this script.
+  const parts = String(addressValue).split("/");
+  const flags = [];
+  for (let i = 1; i < parts.length; i++) {
+    const flag = parts[i].trim().toLowerCase();
+    if (flag) flags.push(flag);
+  }
+  return flags;
+}
+
 
 function appendFlagToAddress(sheet, row, currentStop, flag) {
   const newValue = currentStop + "/" + flag;
