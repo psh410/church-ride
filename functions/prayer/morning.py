@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -309,20 +310,46 @@ def get_recipients_for_week(schedule_dict: dict, roster: dict[str, str]) -> list
     Returns:
         list[str]: Unique recipient emails, sorted.
     """
+    emails, _ = resolve_recipients_for_week(schedule_dict, roster)
+    return emails
+
+
+def resolve_recipients_for_week(
+    schedule_dict: dict, roster: dict[str, str]
+) -> tuple[list[str], list[str]]:
+    """Resolve the week's recipients, and report the names that failed.
+
+    Args:
+        schedule_dict: Output of get_morning_prayer_schedule().
+        roster: Output of get_roster_emails().
+
+    Returns:
+        tuple[list[str], list[str]]: Unique recipient emails sorted, and
+            a sorted list of human-readable problems, one per name that
+            could not be resolved to exactly one person. Problems are
+            emailed to the coordinator rather than only logged, because
+            the whole failure mode here is silent: a name that resolves
+            to nobody just quietly misses their reminder.
+    """
     emails: set[str] = set()
-    for key, _label in SCHEDULE_DAYS:
+    problems: set[str] = set()
+
+    for key, label in SCHEDULE_DAYS:
         day = schedule_dict.get(key) or {}
-        for name in (day.get("devotional"), day.get("worship")):
+        for role, name in (
+            ("devotional", day.get("devotional")),
+            ("worship", day.get("worship")),
+        ):
             if not name:
                 continue
-            email = _lookup_roster_email(name, roster)
+            email, reason = resolve_roster_email(name, roster)
             if email:
                 emails.add(email)
             else:
-                logger.warning(
-                    "No roster email for Morning Prayer name=%r.", name
-                )
-    return sorted(emails)
+                problems.add(f"{label} {role}: {reason}")
+                logger.warning("Morning Prayer recipient unresolved: %s", reason)
+
+    return sorted(emails), sorted(problems)
 
 
 def send_morning_prayer_email(now: datetime | None = None) -> None:
@@ -349,7 +376,7 @@ def send_morning_prayer_email(now: datetime | None = None) -> None:
 
     try:
         roster = get_roster_emails()
-        recipients = get_recipients_for_week(schedule, roster)
+        recipients, problems = resolve_recipients_for_week(schedule, roster)
     except Exception as exc:
         logger.error("Failed to resolve Morning Prayer recipients: %s", exc)
         return
@@ -369,6 +396,48 @@ def send_morning_prayer_email(now: datetime | None = None) -> None:
     )
     if not sent:
         raise RuntimeError("Failed to send Morning Prayer email")
+
+    if problems:
+        _alert_unresolved_names(problems)
+
+
+def _alert_unresolved_names(problems: list[str]) -> None:
+    """Email the coordinator about names that couldn't be resolved.
+
+    Sent separately rather than appended to the reminder, so the people
+    serving that week don't read internal bookkeeping. Never raises: a
+    failed alert must not take down a reminder that already went out.
+    """
+    lines = [
+        "Some names on this week's Morning Prayer schedule could not be",
+        "matched to exactly one person on the Servants tab, so they did",
+        "NOT receive the reminder:",
+        "",
+    ]
+    lines.extend(f"  - {problem}" for problem in problems)
+    lines += [
+        "",
+        "A name matching nobody is usually a spelling difference between",
+        "the rotation sheet and the Servants tab. A name matching several",
+        "people needs a surname added on the rotation sheet to tell them",
+        "apart. Either way the fix is in the sheet, not the code.",
+        "",
+        "Nobody is ever guessed at. That is deliberate: the previous",
+        "behavior was to pick whichever namesake appeared first on the",
+        "Servants tab, which quietly sent one person's reminder to",
+        "another.",
+    ]
+
+    try:
+        send_email(
+            to=ALWAYS_BCC,
+            subject="Morning Prayer: unmatched names this week",
+            body="\n".join(lines),
+            bcc=None,
+        )
+        logger.info("Alerted %s about %d unresolved name(s).", ALWAYS_BCC, len(problems))
+    except Exception as exc:
+        logger.error("Could not send unresolved-name alert: %s", exc)
 
 
 def send_morning_reminder() -> dict:
@@ -519,46 +588,151 @@ def _servant_roster_names() -> set[str]:
 
 
 def _names_mentioned(text: str, roster: set[str]) -> set[str]:
-    """Return roster names whose first or full name appears in text."""
+    """Return roster names whose first or full name appears in text.
+
+    Matched on word boundaries rather than as substrings. The old
+    substring test meant any short given name hiding inside an ordinary
+    English word marked that person absent: "No prayer this Sunday"
+    flagged Sun, "arrive 10 minutes early" flagged Min, and "Enjoy the
+    week" flagged Joy. Short Korean given names are exactly the ones
+    ordinary words swallow, so this hit the roster it could least
+    afford to.
+    """
     lowered = text.lower()
     found: set[str] = set()
     for name in roster:
-        if name.lower() in lowered:
+        if _mentions_word(lowered, name.lower()):
             found.add(name)
             continue
-        first = name.replace("-", " ").split()[0].lower()
-        if first and first in lowered.split():
+        first = _given_name(name)
+        if first and _mentions_word(lowered, first):
             found.add(name)
     return found
 
 
+def _mentions_word(haystack_lower: str, needle_lower: str) -> bool:
+    """Whether needle appears in haystack as a whole word."""
+    if not needle_lower:
+        return False
+    return re.search(rf"\b{re.escape(needle_lower)}\b", haystack_lower) is not None
+
+
 def _name_is_absent(name: str | None, absences: set[str]) -> bool:
+    """Whether this schedule name matches anyone marked absent.
+
+    Uses _same_person rather than the old "any token in common" test,
+    which treated everyone sharing a surname as the same human being.
+    On a roster where a large share of surnames are Kim, Lee or Park,
+    marking one person away struck out every one of their namesakes on
+    the rendered schedule.
+    """
     if not name:
         return False
-    for absent in absences:
-        if name.lower() == absent.lower():
-            return True
-        if _name_tokens(name) & _name_tokens(absent):
-            return True
-    return False
+    return any(_same_person(name, absent) for absent in absences)
+
+
+def _given_name(name: str | None) -> str:
+    """The first token of a name, lowercased. "Dae-Woung Kang" -> "dae"."""
+    tokens = _ordered_tokens(name)
+    return tokens[0] if tokens else ""
+
+
+def _ordered_tokens(name: str | None) -> list[str]:
+    """Lowercased name tokens in order, hyphens treated as spaces.
+
+    Trailing punctuation is dropped so "Kristin K." tokenizes the same
+    way "Kristin K" does.
+    """
+    if not name:
+        return []
+    cleaned = name.replace("-", " ").lower()
+    return [part.strip(".,;:") for part in cleaned.split() if part.strip(".,;:")]
+
+
+def _same_person(a: str | None, b: str | None) -> bool:
+    """Whether two written names plausibly refer to one person.
+
+    The rule: given names must match, and the remaining tokens must not
+    contradict each other. One side having no surname is treated as
+    compatible, since schedules routinely carry a bare first name while
+    the roster carries the full one.
+
+        "Justin"      vs "Justin Kim"   -> same    (surname absent, not contradicted)
+        "Kristin K."  vs "Kristin Kim"  -> same    (K is a prefix of Kim)
+        "Justin Kim"  vs "Kristin Kim"  -> DIFFERENT (given names differ)
+        "David Sun"   vs "David Lee"    -> DIFFERENT (surnames contradict)
+        "Kim"         vs "Justin Kim"   -> DIFFERENT (a bare surname identifies nobody)
+
+    That last case is the important one. It is tempting to let a bare
+    surname match, and it is exactly how the old code handed one
+    person's email to another.
+    """
+    a_tokens, b_tokens = _ordered_tokens(a), _ordered_tokens(b)
+    if not a_tokens or not b_tokens:
+        return False
+    if a_tokens == b_tokens:
+        return True
+    if a_tokens[0] != b_tokens[0]:
+        return False
+
+    a_rest, b_rest = a_tokens[1:], b_tokens[1:]
+    if not a_rest or not b_rest:
+        # One side is a bare given name. Nothing contradicts.
+        return True
+    if len(a_rest) != len(b_rest):
+        return False
+    # Allow an initial to stand for a full surname, so "Kristin K"
+    # matches "Kristin Kim" but never "Kristin Park".
+    return all(
+        x == y or x.startswith(y) or y.startswith(x)
+        for x, y in zip(a_rest, b_rest)
+    )
 
 
 def _lookup_roster_email(name: str, roster: dict[str, str]) -> str | None:
-    """Resolve a schedule name to a Servants-tab email.
+    """Resolve a schedule name to exactly one Servants-tab email.
 
-    Exact (case-insensitive) match first, then a first-name / token
-    match in either direction.
+    Returns None when the name matches nobody OR matches more than one
+    person. Refusing to answer is the point: the previous version
+    returned the first roster entry sharing any token, in sheet row
+    order, so "Ryan Kim" was handed Ryan Bielak's address and reordering
+    the Servants tab silently changed who got the email.
+
+    Use resolve_roster_email() when the caller needs to report why.
+    """
+    email, _ = resolve_roster_email(name, roster)
+    return email
+
+
+def resolve_roster_email(
+    name: str, roster: dict[str, str]
+) -> tuple[str | None, str]:
+    """Resolve a name to one email, with the reason when it can't.
+
+    Args:
+        name: The name as written on the schedule sheet.
+        roster: Output of get_roster_emails().
+
+    Returns:
+        tuple[str | None, str]: The email and an empty string on
+            success, or None and a human-readable reason. The reason is
+            written to be read by whoever has to fix the sheet, so it
+            names the candidates when a name is ambiguous.
     """
     if not name:
-        return None
+        return None, "empty name"
+
     for roster_name, email in roster.items():
         if roster_name.lower() == name.lower():
-            return email
-    name_tokens = _name_tokens(name)
-    for roster_name, email in roster.items():
-        if name_tokens & _name_tokens(roster_name):
-            return email
-    return None
+            return email, ""
+
+    matches = [(rn, em) for rn, em in roster.items() if _same_person(name, rn)]
+    if len(matches) == 1:
+        return matches[0][1], ""
+    if not matches:
+        return None, f"{name!r} is not on the Servants tab"
+    names = ", ".join(sorted(rn for rn, _ in matches))
+    return None, f"{name!r} could be any of: {names}"
 
 
 def _name_tokens(name: str) -> set[str]:
