@@ -19,6 +19,7 @@ from datetime import datetime
 
 from config import settings
 from db.firestore_client import (
+    clear_return_ride_request,
     clear_rider_confirmation,
     get_semester_schedule,
     record_disclosure_sent,
@@ -59,13 +60,20 @@ FIRST_CONTACT_DISCLOSURE = (
 
 
 def build_reset_reply(phone: str) -> str:
-    """Clear this admin's own ride confirmation and report what happened.
+    """Clear this admin's own test state and report what happened.
 
-    Confirmations are deliberately capped at one per phone per Sunday,
-    which is correct in production and inconvenient while testing: the
-    second signup from a test phone is skipped, and it looks like a
-    broken feature rather than a working guard. This removes that
-    number's record so the next signup behaves like a first one.
+    Two things, both of which exist to stop a test looking like a bug or
+    turning into one.
+
+    Confirmations are capped at one per phone per Sunday, which is
+    correct in production and inconvenient while testing: the second
+    signup from a test phone is skipped, and it looks like a broken
+    feature rather than a working guard.
+
+    Return ride requests are the opposite problem. Admins can use RIDE
+    outside Sunday to test it, which puts a real row on a real service's
+    list where it counts against the 28 seats. Clearing it here means
+    testing never quietly inflates Sunday's headcount.
 
     Args:
         phone: The sender's phone number, in any format
@@ -81,21 +89,46 @@ def build_reset_reply(phone: str) -> str:
 
     sunday_date = get_next_sunday_date()
 
+    cleared: list[str] = []
+    failed: list[str] = []
+
     try:
-        cleared = clear_rider_confirmation(normalized, sunday_date)
+        if clear_rider_confirmation(normalized, sunday_date):
+            cleared.append("signup confirmation")
     except RuntimeError as exc:
-        logger.error("RESETME failed for %s: %s", normalized, exc)
-        return f"{BRAND_PREFIX} Couldn't clear your confirmation just now."
+        logger.error("RESETME confirmation clear failed for %s: %s", normalized, exc)
+        failed.append("signup confirmation")
+
+    # Cleared independently of the confirmation: one failing must not
+    # leave the other silently untouched while the reply implies both
+    # were handled.
+    try:
+        if clear_return_ride_request(normalized, sunday_date):
+            cleared.append("return ride request")
+    except RuntimeError as exc:
+        logger.error("RESETME return ride clear failed for %s: %s", normalized, exc)
+        failed.append("return ride request")
+
+    if failed:
+        return (
+            f"{BRAND_PREFIX} Couldn't clear your {' and '.join(failed)} "
+            f"just now."
+        )
 
     if cleared:
-        logger.info("Cleared rider confirmation for %s (%s).", normalized, sunday_date)
+        logger.info(
+            "RESETME cleared %s for %s (%s).",
+            " and ".join(cleared),
+            normalized,
+            sunday_date,
+        )
         return (
-            f"{BRAND_PREFIX} Cleared your ride confirmation for "
-            f"{sunday_date}. Sign up again to test."
+            f"{BRAND_PREFIX} Cleared your {' and '.join(cleared)} for "
+            f"{sunday_date}. Test again when ready."
         )
 
     return (
-        f"{BRAND_PREFIX} No ride confirmation on file for {sunday_date}. "
+        f"{BRAND_PREFIX} Nothing on file for {sunday_date}. "
         f"Nothing to clear."
     )
 

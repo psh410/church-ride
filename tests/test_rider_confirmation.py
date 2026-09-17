@@ -164,7 +164,8 @@ for label, text in [("stop", dup_stop), ("full", dup_full), ("off-route", dup_of
 
 # --- 8. RESETME -------------------------------------------------------
 with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
-     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=True) as m_clear:
+     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=True) as m_clear, \
+     mock.patch.object(summary_mod, "clear_return_ride_request", return_value=False):
     reply = summary_mod.build_reset_reply("703-401-0571")
 check("RESETME clears the sender's own number",
       m_clear.call_args[0][0] == "+17034010571", str(m_clear.call_args))
@@ -173,10 +174,41 @@ check("RESETME confirms what it cleared", "Cleared" in reply and SUNDAY in reply
 check("RESETME reply is branded", reply.startswith(BRAND_PREFIX), reply[:40])
 
 with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
-     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=False):
+     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=False), \
+     mock.patch.object(summary_mod, "clear_return_ride_request", return_value=False):
     reply_empty = summary_mod.build_reset_reply("703-401-0571")
 check("RESETME says so when there was nothing to clear",
       "Nothing to clear" in reply_empty, reply_empty)
+
+# RESETME also clears a return ride request, because an admin testing
+# RIDE outside Sunday puts a real row on a real service's list where it
+# counts against the 28 seats.
+with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
+     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=False), \
+     mock.patch.object(summary_mod, "clear_return_ride_request", return_value=True) as m_ride:
+    reply_ride = summary_mod.build_reset_reply("703-401-0571")
+check("RESETME clears the return ride request too",
+      "return ride request" in reply_ride, reply_ride)
+check("RESETME clears the ride request for the sender's own number",
+      m_ride.call_args[0][0] == "+17034010571", str(m_ride.call_args))
+
+with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
+     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=True), \
+     mock.patch.object(summary_mod, "clear_return_ride_request", return_value=True):
+    reply_both = summary_mod.build_reset_reply("703-401-0571")
+check("RESETME names both when it cleared both",
+      "signup confirmation" in reply_both and "return ride request" in reply_both,
+      reply_both)
+
+# One failing must not leave the other silently unreported.
+with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
+     mock.patch.object(summary_mod, "clear_rider_confirmation", return_value=True), \
+     mock.patch.object(summary_mod, "clear_return_ride_request",
+                       side_effect=RuntimeError("firestore down")):
+    reply_partial = summary_mod.build_reset_reply("703-401-0571")
+check("RESETME reports a partial failure instead of claiming success",
+      "Couldn't clear" in reply_partial and "return ride request" in reply_partial,
+      reply_partial)
 
 with mock.patch.object(summary_mod, "get_next_sunday_date", return_value=SUNDAY), \
      mock.patch.object(

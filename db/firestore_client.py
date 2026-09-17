@@ -1017,3 +1017,43 @@ def get_cancelled_phones_for_sunday(sunday_date: str) -> set:
         raise RuntimeError(
             f"Failed to read cancellations for date={sunday_date!r}: {exc}"
         ) from exc
+
+
+def clear_return_ride_request(phone: str, sunday_date: str) -> bool:
+    """Remove one phone's return ride request for a Sunday.
+
+    Exists because admins can use RIDE outside Sunday to test it, which
+    puts a real row on a real service's list where it counts against the
+    28 seats. A test that quietly inflates Sunday's headcount is worse
+    than no test at all.
+
+    The counter is deliberately NOT decremented. Positions are handed
+    out once and never reissued, so rolling the counter back would give
+    a later rider a position somebody already holds, which is exactly
+    the collision the transaction exists to prevent. The count reported
+    by REQUESTS comes from the stored requests themselves, not from the
+    counter, so removing the row is enough to correct it.
+
+    Args:
+        phone: The requester's number, E.164 preferred.
+        sunday_date: The service date, ISO "YYYY-MM-DD".
+
+    Returns:
+        bool: True if a request was removed, False if there was none.
+
+    Raises:
+        RuntimeError: If the delete fails.
+    """
+    doc_id = f"{sunday_date}_{phone}"
+    try:
+        client = get_client()
+        doc_ref = client.collection(RETURN_RIDE_REQUESTS_COLLECTION).document(doc_id)
+        if not doc_ref.get().exists:
+            return False
+        doc_ref.delete()
+        return True
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to clear return ride request for phone={phone!r} "
+            f"date={sunday_date!r}: {exc}"
+        ) from exc
