@@ -47,11 +47,24 @@ RIDE_KEYWORD = "RIDE"
 
 # What Dae/Sarah text to pull the live count. Admin-allowlist gated, same
 # as ADMIN_SUMMARY_KEYWORDS (UPDATE/STATUS) in functions/send_admin_summary.py.
-REQUESTS_KEYWORDS = {"REQUESTS"}
+REQUESTS_KEYWORD = "REQUESTS"
 
-# How many names to list on the "Over" line before truncating, so a busy
-# Sunday doesn't blow REQUESTS past a couple of SMS segments.
+# Kept as a set because cloud_app and the collision tests both read it
+# that way, and because a future alias belongs here rather than in a
+# second place.
+REQUESTS_KEYWORDS = {REQUESTS_KEYWORD}
+
+# How many names to list on the "Over" line before truncating, so a bare
+# REQUESTS stays short on a busy Sunday. Anyone wanting the rest texts
+# "REQUESTS ALL".
 MAX_OVERFLOW_NAMES_SHOWN = 8
+
+# Roughly two SMS segments per part. Twilio would happily concatenate a
+# much longer body, but a phone showing one enormous bubble is harder to
+# read on a sidewalk than a few numbered ones, and a failed segment in
+# the middle of a concatenated message loses the whole thing rather than
+# one part of it.
+MAX_PART_CHARS = 300
 
 # Appended to a number's FIRST reply from ANY admin keyword, not just
 # this one - disclosure_sent is a single flag per phone in Firestore,
@@ -128,6 +141,31 @@ def matches_ride_keyword(body: str) -> bool:
         bool: True if this message should be handled as a RIDE request.
     """
     return body == RIDE_KEYWORD or body.startswith(f"{RIDE_KEYWORD} ")
+
+
+def matches_requests_keyword(body: str) -> bool:
+    """Whether an inbound body is a REQUESTS command, with or without an
+    argument.
+
+    Whole-word matched for the same reason RIDE is: "REQUESTS" exactly,
+    or "REQUESTS " followed by something. A plain "starts with" check
+    would swallow any future keyword sharing the prefix.
+
+    Args:
+        body: The inbound body, already uppercased and stripped.
+    """
+    return body == REQUESTS_KEYWORD or body.startswith(f"{REQUESTS_KEYWORD} ")
+
+
+def wants_full_list(body: str) -> bool:
+    """Whether this REQUESTS text asked for the full rider list.
+
+    Any argument at all counts. Deliberately forgiving: an admin who
+    types "REQUESTS ALL", "REQUESTS FULL", "REQUESTS NAMES" or fumbles
+    it entirely gets the long version, which is never harmful, rather
+    than the short one with no hint that the argument was ignored.
+    """
+    return bool(body[len(REQUESTS_KEYWORD):].strip())
 
 
 def parse_ride_command(body: str) -> str | None:
@@ -261,30 +299,142 @@ def build_requests_summary(sunday_date: str | None = None) -> str:
     return "\n".join(lines)
 
 
-def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
-    """Build the full REQUESTS reply to send one admin, disclosure included if due.
+def build_requests_full_lines(sunday_date: str | None = None) -> list[str]:
+    """Every rider for a Sunday, in the order they signed up.
 
-    Mirrors functions.send_admin_summary.build_admin_reply() exactly,
-    including sharing its disclosure_sent bookkeeping: the counts are
-    the same for everyone, what varies is whether this phone number has
-    been sent the program disclosure yet, from either admin keyword.
+    Sorted alphabetically by whatever the rider typed, not by signup
+    order, because the only thing anyone does with this list is read it
+    while looking for a particular person. Some enter a full name and
+    some just a first name; no attempt is made to normalise that, since
+    guessing which word is a surname is how the Morning Prayer roster
+    started emailing the wrong people.
+
+    Riders past capacity are listed under a "Need driver" heading rather
+    than flagged one by one, because that section is read top to bottom
+    while phoning people.
+
+    Numbering is sequential down the printed list, so a reader partway
+    through part 2 knows where they are. It is NOT the seat position,
+    which is assigned at signup and would jump around once sorted.
+
+    Args:
+        sunday_date: Optional ISO "YYYY-MM-DD". Defaults to the coming
+            Sunday.
+
+    Returns:
+        list[str]: Body lines, without the brand prefix or any part
+            numbering. Empty riders produce a single "nobody yet" line.
+
+    Raises:
+        RuntimeError: If the requests can't be read from Firestore.
+    """
+    if sunday_date is None:
+        sunday_date = _service_sunday()
+
+    requests = get_return_ride_requests_for_date(sunday_date)
+    if not requests:
+        return [f"Returns for {_format_short_date(sunday_date)}: nobody yet."]
+
+    def by_name(req):
+        # casefold rather than lower, so names entered in other scripts
+        # or with accents still sort predictably.
+        return _display_text(req.get("raw_text", "")).casefold()
+
+    shuttle = sorted((r for r in requests if not r.get("needs_driver")), key=by_name)
+    overflow = sorted((r for r in requests if r.get("needs_driver")), key=by_name)
+
+    lines = [
+        f"Returns for {_format_short_date(sunday_date)}: {len(requests)} "
+        f"({len(shuttle)} shuttle, {len(overflow)} need drivers)"
+    ]
+
+    counter = 0
+    for req in shuttle:
+        counter += 1
+        lines.append(f"{counter}. {_display_text(req.get('raw_text', ''))}")
+
+    if overflow:
+        lines.append("Need driver:")
+        for req in overflow:
+            counter += 1
+            lines.append(f"{counter}. {_display_text(req.get('raw_text', ''))}")
+
+    return lines
+
+
+def split_into_parts(lines: list[str], max_chars: int = MAX_PART_CHARS) -> list[str]:
+    """Pack lines into numbered SMS parts.
+
+    Splits on line boundaries so a rider's name and address never land
+    in different texts. Parts are numbered "(1/3)" only when there is
+    more than one, since "(1/1)" on a short reply is just noise.
+
+    A single line longer than max_chars is not broken up: it goes out
+    oversized and Twilio concatenates it. Breaking mid-address to honour
+    a self-imposed limit would make it less readable, not more.
+
+    Args:
+        lines: Body lines, without the brand prefix.
+        max_chars: Soft ceiling per part, before the prefix and counter.
+
+    Returns:
+        list[str]: Complete message bodies, each already branded.
+    """
+    if not lines:
+        return [f"{BRAND_PREFIX}\nNothing to report."]
+
+    chunks: list[list[str]] = [[]]
+    length = 0
+    for line in lines:
+        # +1 for the newline that will join it to the previous line.
+        addition = len(line) + 1
+        if chunks[-1] and length + addition > max_chars:
+            chunks.append([])
+            length = 0
+        chunks[-1].append(line)
+        length += addition
+
+    total = len(chunks)
+    if total == 1:
+        return [f"{BRAND_PREFIX}\n" + "\n".join(chunks[0])]
+
+    return [
+        f"{BRAND_PREFIX} ({index}/{total})\n" + "\n".join(chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    ]
+
+
+def build_requests_reply(
+    phone: str, sunday_date: str | None = None, full: bool = False
+) -> list[str]:
+    """Build the REQUESTS reply for one admin, as one or more messages.
+
+    Mirrors functions.send_admin_summary.build_admin_reply(), including
+    sharing its disclosure_sent bookkeeping: the counts are the same for
+    everyone, what varies is whether this number has been sent the
+    program disclosure yet, from either admin keyword.
 
     Args:
         phone: The requesting admin's number, E.164 preferred.
         sunday_date: Optional ISO "YYYY-MM-DD" date to summarize.
             Defaults to the coming Sunday.
+        full: True for every rider and destination, split across numbered
+            parts. False for the counts and the overflow names only.
 
     Returns:
-        str: The SMS body to reply with.
+        list[str]: One or more SMS bodies, in order. A list even when
+            there is one, so callers never have to handle both shapes.
 
     Raises:
-        RuntimeError: If the requests can't be read (from
-            build_requests_summary). Disclosure bookkeeping never
-            raises: if Firestore is unreachable we err toward including
-            the disclosure, since sending it twice is harmless and
-            skipping it is the compliance problem.
+        RuntimeError: If the requests can't be read. Disclosure
+            bookkeeping never raises: if Firestore is unreachable we err
+            toward including the disclosure, since sending it twice is
+            harmless and skipping it is the compliance problem.
     """
-    summary = build_requests_summary(sunday_date)
+    if full:
+        parts = split_into_parts(build_requests_full_lines(sunday_date))
+    else:
+        parts = [build_requests_summary(sunday_date)]
 
     try:
         already_disclosed = was_disclosure_sent(phone)
@@ -298,7 +448,7 @@ def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
         already_disclosed = False
 
     if already_disclosed:
-        return summary
+        return parts
 
     try:
         record_disclosure_sent(phone)
@@ -308,7 +458,10 @@ def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
         logger.warning("Could not record disclosure for %s: %s", phone, exc)
 
     logger.info("Including first-contact disclosure in REQUESTS reply to %s.", phone)
-    return f"{summary}\n{FIRST_CONTACT_DISCLOSURE}"
+    # On the last part, so a multi-part reply doesn't put the opt-out
+    # instruction somewhere the reader has already scrolled past.
+    parts[-1] = f"{parts[-1]}\n{FIRST_CONTACT_DISCLOSURE}"
+    return parts
 
 
 # --------------------------------------------------------------------------

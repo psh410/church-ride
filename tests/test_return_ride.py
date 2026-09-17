@@ -369,6 +369,119 @@ def _fake_request(position: int, needs_driver: bool, raw_text: str) -> dict:
     return {"position": position, "needs_driver": needs_driver, "raw_text": raw_text}
 
 
+def _rows(names, capacity=28):
+    return [
+        {"position": i, "raw_text": n, "needs_driver": i > capacity}
+        for i, n in enumerate(names, start=1)
+    ]
+
+
+def _full_lines(names, capacity=28):
+    with mock.patch.object(
+        return_ride_mod, "get_return_ride_requests_for_date",
+        return_value=_rows(names, capacity),
+    ):
+        return return_ride_mod.build_requests_full_lines("2026-09-20")
+
+
+def test_requests_keyword_matches_with_and_without_an_argument():
+    for body in ("REQUESTS", "REQUESTS ALL", "REQUESTS FULL", "REQUESTS names"):
+        check(return_ride_mod.matches_requests_keyword(body), f"{body!r} should match")
+    for body in ("REQUESTSALL", "REQUEST", "REQUESTED", "RIDE"):
+        check(not return_ride_mod.matches_requests_keyword(body),
+              f"{body!r} should NOT match")
+
+
+def test_only_an_argument_asks_for_the_full_list():
+    check(not return_ride_mod.wants_full_list("REQUESTS"),
+          "bare REQUESTS should give the short summary")
+    for body in ("REQUESTS ALL", "REQUESTS FULL", "REQUESTS anything"):
+        check(return_ride_mod.wants_full_list(body),
+              f"{body!r} should ask for the full list")
+
+
+def test_the_full_list_is_sorted_by_what_the_rider_typed():
+    # Some enter a full name, some only a first name, and the casing is
+    # whatever their keyboard did. Sorted on the raw text, case-folded.
+    lines = _full_lines(["tom suh PAR", "Amy Ko ISR", "Dan", "john kim FAR"])
+    entries = [l.split(". ", 1)[1] for l in lines if l[0].isdigit()]
+    check(entries == ["Amy Ko ISR", "Dan", "john kim FAR", "tom suh PAR"],
+          f"should be alphabetical regardless of case: {entries}")
+
+
+def test_riders_needing_drivers_are_grouped_and_sorted_too():
+    names = [f"Rider {i:02d}" for i in range(1, 31)]
+    lines = _full_lines(names, capacity=28)
+    check("Need driver:" in lines, "the overflow group should have a heading")
+    tail = lines[lines.index("Need driver:") + 1:]
+    check(len(tail) == 2, f"two riders past 28, got {len(tail)}")
+    names_in_tail = [l.split(". ", 1)[1] for l in tail]
+    check(names_in_tail == sorted(names_in_tail),
+          f"the overflow group should be sorted too: {names_in_tail}")
+
+
+def test_numbering_runs_down_the_printed_list_not_by_seat_position():
+    # Seat positions are assigned at signup and jump around once sorted,
+    # so the printed numbers are a reading aid and must stay sequential.
+    lines = _full_lines(["zoe", "amy", "dan"])
+    numbers = [int(l.split(".", 1)[0]) for l in lines if l[0].isdigit()]
+    check(numbers == [1, 2, 3], f"numbering should be sequential, got {numbers}")
+
+
+def test_an_empty_sunday_says_so_rather_than_printing_an_empty_list():
+    lines = _full_lines([])
+    check(len(lines) == 1 and "nobody yet" in lines[0], f"got {lines}")
+
+
+def test_a_short_list_is_one_unnumbered_part():
+    parts = return_ride_mod.split_into_parts(["Returns: 2", "1. Amy", "2. Dan"])
+    check(len(parts) == 1, f"should fit in one part, got {len(parts)}")
+    check("(1/1)" not in parts[0], f"a single part should not be numbered: {parts[0]!r}")
+
+
+def test_a_long_list_is_split_and_every_part_is_numbered():
+    lines = [f"{i}. Rider Number {i:02d} Somewhere Hall" for i in range(1, 41)]
+    parts = return_ride_mod.split_into_parts(lines)
+    check(len(parts) > 1, "40 riders should need more than one part")
+    total = len(parts)
+    for index, part in enumerate(parts, start=1):
+        check(f"({index}/{total})" in part,
+              f"part {index} should be labelled ({index}/{total}): {part[:40]!r}")
+        check(part.startswith(return_ride_mod.BRAND_PREFIX),
+              "every part should be branded, since each arrives as its own text")
+
+
+def test_splitting_never_breaks_a_rider_across_two_texts():
+    lines = [f"{i}. Rider Number {i:02d} Somewhere Hall" for i in range(1, 41)]
+    parts = return_ride_mod.split_into_parts(lines)
+    rebuilt = []
+    for part in parts:
+        rebuilt.extend(part.split("\n")[1:])  # drop each part's brand line
+    check(rebuilt == lines,
+          "every line should survive splitting, whole and in order")
+
+
+def test_an_oversized_single_line_is_not_chopped_mid_address():
+    long_line = "1. " + "A Very Long Address " * 30
+    parts = return_ride_mod.split_into_parts([long_line])
+    check(len(parts) == 1, "one line cannot be split across parts")
+    check(long_line in parts[0], "the line should survive intact")
+
+
+def test_the_disclosure_lands_on_the_last_part():
+    lines = [f"{i}. Rider Number {i:02d} Somewhere Hall" for i in range(1, 41)]
+    with mock.patch.object(return_ride_mod, "build_requests_full_lines", return_value=lines), \
+         mock.patch.object(return_ride_mod, "was_disclosure_sent", return_value=False), \
+         mock.patch.object(return_ride_mod, "record_disclosure_sent"):
+        parts = return_ride_mod.build_requests_reply("+12246594130", full=True)
+
+    check(len(parts) > 1, "this should be a multi-part reply")
+    check(OPT_OUT_NOTICE in parts[-1],
+          "the opt-out instruction belongs on the part the reader ends on")
+    check(OPT_OUT_NOTICE not in parts[0],
+          "and not buried in an earlier part they have scrolled past")
+
+
 def test_requests_summary_zero_requested():
     with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=[]):
         summary = return_ride_mod.build_requests_summary("2026-09-13")
@@ -441,7 +554,11 @@ def test_requests_reply_first_contact_gets_disclosure_once():
 
     check(was_sent.called, "should check disclosure status")
     check(record_sent.called, "should record that disclosure was sent")
-    check(OPT_OUT_NOTICE in first_reply, "first-ever reply should carry the disclosure/opt-out notice")
+    # A list of parts now, and the disclosure rides on the LAST one so a
+    # multi-part reply doesn't bury the opt-out instruction above the
+    # part the reader ends on.
+    check(OPT_OUT_NOTICE in first_reply[-1],
+          "first-ever reply should carry the disclosure/opt-out notice")
 
     with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=[]), \
          mock.patch.object(return_ride_mod, "was_disclosure_sent", return_value=True):

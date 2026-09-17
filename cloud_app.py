@@ -718,10 +718,11 @@ def sms_webhook():
       here open to anyone: no allowlist and no roster check, because
       this is how riders say, in the minutes after service, that they
       want a ride home. Always replies, so a rider never gets silence.
-    - Return ride count (REQUESTS). Replies with the live return
-      headcount and any names past shuttle capacity, so Dae and Sarah
-      can see whether personal drivers are needed. Same allowlist as
-      UPDATE.
+    - Return ride count (REQUESTS, or REQUESTS ALL). Bare, it replies
+      with the live return headcount and any names past shuttle
+      capacity, so Dae and Sarah can see whether personal drivers are
+      needed. With any argument it sends every rider and destination,
+      split across numbered parts. Same allowlist as UPDATE.
     - Ride cancellation (SKIP, plus the unadvertised aliases NORIDE,
       OUT and CANT). Answers the Saturday night reminder: gives up that
       Sunday's seat, records it, and flags the signup row. Authorized by
@@ -826,10 +827,11 @@ def sms_webhook():
             )
 
             from functions.return_ride import (
-                REQUESTS_KEYWORDS,
                 build_requests_reply,
                 build_ride_reply,
+                matches_requests_keyword,
                 matches_ride_keyword,
+                wants_full_list,
             )
 
             from functions.rider_reminder import SKIP_KEYWORDS, build_skip_reply
@@ -945,7 +947,10 @@ def sms_webhook():
                     {"Content-Type": "text/xml"},
                 )
 
-            elif body in REQUESTS_KEYWORDS:
+            elif matches_requests_keyword(body):
+                # Bare REQUESTS gives the counts. Any argument
+                # ("REQUESTS ALL") gives every rider and destination,
+                # split across numbered parts.
                 if not is_admin_phone(normalized):
                     # Same silence as an unauthorized UPDATE.
                     logger.warning(
@@ -955,22 +960,32 @@ def sms_webhook():
                     )
                 else:
                     try:
-                        summary = build_requests_reply(normalized)
+                        parts = build_requests_reply(
+                            normalized, full=wants_full_list(body)
+                        )
                         logger.info(
-                            "Replied with return ride count to admin %s.",
+                            "Replied with return ride counts to admin %s (%d part(s)).",
                             normalized,
+                            len(parts),
                         )
                     except Exception as exc:
                         logger.error("Could not build REQUESTS reply: %s", exc)
-                        summary = (
+                        parts = [
                             "CFC Rides: couldn't pull the return counts just "
                             "now. Please try again in a minute."
-                        )
+                        ]
 
                     from xml.sax.saxutils import escape
 
+                    # One <Message> per part. Twilio sends them in order
+                    # as separate texts, which is why each part carries
+                    # its own "(1/3)" rather than relying on the phone to
+                    # reassemble a single long body.
+                    messages = "".join(
+                        f"<Message>{escape(part)}</Message>" for part in parts
+                    )
                     return (
-                        f"<Response><Message>{escape(summary)}</Message></Response>",
+                        f"<Response>{messages}</Response>",
                         200,
                         {"Content-Type": "text/xml"},
                     )
