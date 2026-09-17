@@ -480,6 +480,54 @@ def preview_saturday_rider_reminder_route():
         return f"error: {exc}", 500, {"Content-Type": "text/plain"}
 
 
+@app.route("/debug-stops", methods=["GET"])
+def debug_stops_route():
+    """Show the Routes tab stop names against what riders actually typed.
+
+    A rider whose campus address does not match a stop name exactly gets
+    shuttle_id None, which routes them to the generic reminder and out
+    of every shuttle count. That failure is silent and looks identical
+    to an address that is genuinely off-route, so this prints both sides
+    and marks which typed values matched.
+
+    Optional ?sunday=YYYY-MM-DD, defaulting to the coming Sunday.
+    """
+    try:
+        from flask import request
+
+        from functions.read_riders_sheet import (
+            get_next_sunday_date,
+            get_riders_for_sunday,
+            get_stop_to_shuttle_map,
+        )
+
+        sunday = request.args.get("sunday") or get_next_sunday_date()
+        stop_map = get_stop_to_shuttle_map()
+        riders = get_riders_for_sunday(sunday, include_non_shuttle=True)
+
+        lines = [f"Sunday {sunday}", "", "KNOWN STOPS (Routes tab)", "-" * 40]
+        for name, shuttle in sorted(stop_map.items()):
+            lines.append(f"  {name!r} -> {shuttle}")
+
+        lines += ["", f"WHAT RIDERS TYPED ({len(riders)})", "-" * 40]
+        for rider in riders:
+            typed = rider.get("stop", "")
+            mark = "matched" if rider.get("shuttle_id") else "NO MATCH"
+            lines.append(f"  [{mark}] {typed!r}   ({rider.get('name', '')})")
+
+        unmatched = [r.get("stop", "") for r in riders if not r.get("shuttle_id")]
+        lines += ["", f"{len(unmatched)} of {len(riders)} did not match a stop."]
+        if unmatched:
+            lines.append(
+                "If any of those look like a dorm that IS on the Routes tab, "
+                "the matching is the problem, not the address."
+            )
+        return "\n".join(lines), 200, {"Content-Type": "text/plain"}
+    except Exception as exc:
+        logger.error("Stop debug failed: %s", exc)
+        return f"error: {exc}", 500, {"Content-Type": "text/plain"}
+
+
 @app.route("/debug-consent-column", methods=["GET"])
 def debug_consent_column_route():
     """Report every consent-looking column and which one is actually read.

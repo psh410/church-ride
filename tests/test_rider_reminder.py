@@ -304,8 +304,13 @@ def test_dry_run_sends_absolutely_nothing():
     check(sent == [], f"dry run must send nothing, sent {len(sent)}")
     check(result["status"] == "dry_run", f"status should say dry_run, got {result['status']}")
     check(result["sent"] == 2, "dry run should still report who it would have texted")
-    check(any("WOULD SEND" in d for d in result["details"]),
-          "dry run details should show the message bodies")
+    # Assert on the message itself rather than on a label, so rewording
+    # the preview does not fail a test about whether it sends.
+    check(any("your ride is this Sunday" in d for d in result["details"]),
+          f"dry run details should show the message bodies: {result['details']}")
+    check(any("stop=" in d for d in result["details"]),
+          "dry run should echo what the rider typed, since that is what "
+          "distinguishes an off-route address from failed stop matching")
 
 
 def test_only_consenting_riders_are_texted():

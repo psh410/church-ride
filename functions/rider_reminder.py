@@ -301,8 +301,15 @@ def send_saturday_rider_reminders(
 
         if dry_run:
             sent += 1
-            kind = "shuttle" if on_shuttle else "no shuttle"
-            details.append(f"{name} ({phone}, {kind}): WOULD SEND\n    {body}")
+            # The stop is echoed because "no shuttle" has two very
+            # different causes: an address genuinely off-route, or a
+            # dorm name that failed to match the Routes tab. Those look
+            # identical in the output otherwise, and the second one
+            # silently costs every rider their pickup details.
+            kind = f"shuttle {rider.get('shuttle_id')}" if on_shuttle else "NO SHUTTLE"
+            details.append(
+                f"{name} ({phone}) stop={stop!r} -> {kind}\n    {body}"
+            )
             continue
 
         if send_sms(phone, body):
