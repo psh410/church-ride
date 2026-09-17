@@ -273,6 +273,15 @@ check("and gets the duplicate wording",
       not sent or "already signed up" in sent[0][1],
       sent[0][1] if sent else "(nothing sent)")
 
+# A cancelled earlier row is not a live signup, so re-signing up after
+# SKIP is a first signup again. Without this the Apps Script would let
+# the submission through as not-a-duplicate while this layer still
+# called it a repeat, and the two would disagree on the same row.
+result, sent, _, _ = run(530, signup("FAR"), PRIOR, sheet_rows=[530])
+check("re-signing up after cancelling is a first signup",
+      sent and "already signed up" not in sent[0][1],
+      sent[0][1] if sent else "(nothing sent)")
+
 result, sent, _, _ = run(
     530, signup("FAR"), PRIOR, sheet_rows=RuntimeError("sheet unreadable")
 )

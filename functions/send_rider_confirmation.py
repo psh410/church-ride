@@ -173,7 +173,13 @@ def _still_signed_up(phone: str, sunday_date: str, this_row: int) -> bool:
     than a mass duplicate send.
     """
     try:
-        rows = find_signup_rows_for_phone(phone, sunday_date)
+        # include_dead=False so this asks the same question the Apps
+        # Script asks: is there a LIVE earlier signup. A row flagged
+        # cancelled or duplicate is not one. Without this the two layers
+        # disagree after a cancellation: the Apps Script correctly lets
+        # the new submission through while this one still calls it a
+        # repeat and texts them that they are already signed up.
+        rows = find_signup_rows_for_phone(phone, sunday_date, include_dead=False)
     except RuntimeError as exc:
         logger.warning(
             "Could not verify signup rows for %s (%s); keeping the stored "

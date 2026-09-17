@@ -714,7 +714,26 @@ def _parse_timestamp(raw: str) -> datetime | None:
     return None
 
 
-def find_signup_rows_for_phone(phone: str, sunday_date: str) -> list[int]:
+# Flags appended to a campus address cell, as "FAR/cancelled". Written
+# by the Apps Script (duplicate, driver) and by the SKIP handler
+# (cancelled). Matched explicitly rather than treating any "/" as a
+# flag, because riders do type addresses like "1002 S Lincoln Apt 1/2".
+SIGNUP_FLAGS = ("duplicate", "driver", "cancelled")
+
+# Flags meaning the row is not a live signup. "driver" is deliberately
+# absent: those riders are signed up, they just aren't on a shuttle.
+DEAD_ROW_FLAGS = ("duplicate", "cancelled")
+
+
+def signup_flags(stop: str) -> set[str]:
+    """Lowercased known flags on a campus address cell."""
+    typed = {part.strip().lower() for part in str(stop).split("/")[1:]}
+    return typed & set(SIGNUP_FLAGS)
+
+
+def find_signup_rows_for_phone(
+    phone: str, sunday_date: str, include_dead: bool = True
+) -> list[int]:
     """Return every 1-indexed sheet row this phone signed up on for a Sunday.
 
     The sheet is the record of who signed up. Firestore holds what the
@@ -725,6 +744,9 @@ def find_signup_rows_for_phone(phone: str, sunday_date: str) -> list[int]:
     Args:
         phone: The rider's phone number, E.164 preferred.
         sunday_date: The Sunday to search, ISO "YYYY-MM-DD".
+        include_dead: If False, rows flagged duplicate or cancelled are
+            left out. Anything asking "is this person signed up" wants
+            False; anything asking "which row is theirs" wants True.
 
     Returns:
         list[int]: Row numbers in sheet order, empty when none match.
@@ -764,6 +786,10 @@ def find_signup_rows_for_phone(phone: str, sunday_date: str) -> list[int]:
         if submitted_at is None:
             continue
         if not (window_start <= submitted_at <= window_end):
+            continue
+        if not include_dead and signup_flags(_cell(row, _STOP_COL)) & set(
+            DEAD_ROW_FLAGS
+        ):
             continue
         try:
             if normalize_to_e164(_cell(row, _PHONE_COL)) == target:
