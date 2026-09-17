@@ -33,6 +33,7 @@ from db.firestore_client import (
     record_rider_confirmed,
 )
 from functions.read_riders_sheet import (
+    find_signup_rows_for_phone,
     get_next_sunday_date,
     get_signup_row,
     get_stop_to_shuttle_map,
@@ -105,6 +106,24 @@ def confirm_signup(row_number: int) -> dict:
                 exc,
             )
 
+        if prior is not None and not _still_signed_up(
+            normalized, sunday_date, row_number
+        ):
+            # The sheet is the record of who signed up; Firestore only
+            # records what we have already told them. Admins delete rows
+            # and Firestore never hears about it, so a stored
+            # confirmation whose row is gone describes a signup that no
+            # longer exists. Treat this submission as their first, and
+            # let it overwrite the stale record.
+            logger.info(
+                "Row %s (%r): prior confirmation on file but no earlier row "
+                "in the sheet for %s; treating as a first signup.",
+                row_number,
+                name,
+                sunday_date,
+            )
+            prior = None
+
         if prior is not None:
             return _answer_repeat_signup(
                 row_number, name, normalized, sunday_date, prior
@@ -139,6 +158,32 @@ def confirm_signup(row_number: int) -> dict:
     except Exception as exc:
         logger.error("Rider confirmation failed for row %s: %s", row_number, exc)
         return {"status": "failed", "reason": str(exc)}
+
+
+def _still_signed_up(phone: str, sunday_date: str, this_row: int) -> bool:
+    """Whether the sheet still shows an EARLIER signup for this number.
+
+    Excludes the row being processed, since that is the submission we
+    are answering rather than evidence of a previous one.
+
+    Fails closed on purpose. If the sheet cannot be read we report True,
+    which keeps the stored confirmation authoritative and sends nothing.
+    The other way round, one failed read would re-text every rider whose
+    confirmation could not be verified, and a stale guard is far cheaper
+    than a mass duplicate send.
+    """
+    try:
+        rows = find_signup_rows_for_phone(phone, sunday_date)
+    except RuntimeError as exc:
+        logger.warning(
+            "Could not verify signup rows for %s (%s); keeping the stored "
+            "confirmation authoritative.",
+            phone,
+            exc,
+        )
+        return True
+
+    return any(row != this_row for row in rows)
 
 
 def _answer_repeat_signup(

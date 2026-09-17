@@ -714,6 +714,66 @@ def _parse_timestamp(raw: str) -> datetime | None:
     return None
 
 
+def find_signup_rows_for_phone(phone: str, sunday_date: str) -> list[int]:
+    """Return every 1-indexed sheet row this phone signed up on for a Sunday.
+
+    The sheet is the record of who signed up. Firestore holds what the
+    system has already told them, which is a different question, and
+    admins delete rows from the sheet without Firestore ever knowing.
+    Anything deciding whether somebody IS signed up has to ask here.
+
+    Args:
+        phone: The rider's phone number, E.164 preferred.
+        sunday_date: The Sunday to search, ISO "YYYY-MM-DD".
+
+    Returns:
+        list[int]: Row numbers in sheet order, empty when none match.
+
+    Raises:
+        RuntimeError: If sunday_date is invalid or the sheet can't be read.
+    """
+    from functions.send_sms import normalize_to_e164
+
+    try:
+        target = normalize_to_e164(phone)
+    except ValueError:
+        return []
+
+    try:
+        window_start, window_end = _get_signup_window(sunday_date)
+    except ValueError as exc:
+        raise RuntimeError(f"Invalid sunday_date={sunday_date!r}: {exc}") from exc
+
+    try:
+        service = get_sheet_client()
+        result = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
+            .execute()
+        )
+        rows = result.get("values", [])
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read '{FORM_RESPONSES_TAB}' tab: {exc}"
+        ) from exc
+
+    found: list[int] = []
+    for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
+        submitted_at = _parse_timestamp(_cell(row, _TIMESTAMP_COL))
+        if submitted_at is None:
+            continue
+        if not (window_start <= submitted_at <= window_end):
+            continue
+        try:
+            if normalize_to_e164(_cell(row, _PHONE_COL)) == target:
+                found.append(index)
+        except ValueError:
+            continue
+
+    return found
+
+
 def find_signup_row_for_phone(phone: str, sunday_date: str) -> int | None:
     """Return the 1-indexed sheet row of a phone's signup for a Sunday.
 
@@ -736,46 +796,8 @@ def find_signup_row_for_phone(phone: str, sunday_date: str) -> int | None:
     Raises:
         RuntimeError: If sunday_date is invalid or the sheet can't be read.
     """
-    from functions.send_sms import normalize_to_e164
-
-    try:
-        target = normalize_to_e164(phone)
-    except ValueError:
-        return None
-
-    try:
-        window_start, window_end = _get_signup_window(sunday_date)
-    except ValueError as exc:
-        raise RuntimeError(f"Invalid sunday_date={sunday_date!r}: {exc}") from exc
-
-    try:
-        service = get_sheet_client()
-        result = (
-            service.spreadsheets()
-            .values()
-            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
-            .execute()
-        )
-        rows = result.get("values", [])
-    except Exception as exc:
-        raise RuntimeError(
-            f"Failed to read '{FORM_RESPONSES_TAB}' tab: {exc}"
-        ) from exc
-
-    found = None
-    for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
-        submitted_at = _parse_timestamp(_cell(row, _TIMESTAMP_COL))
-        if submitted_at is None:
-            continue
-        if not (window_start <= submitted_at <= window_end):
-            continue
-        try:
-            if normalize_to_e164(_cell(row, _PHONE_COL)) == target:
-                found = index
-        except ValueError:
-            continue
-
-    return found
+    rows = find_signup_rows_for_phone(phone, sunday_date)
+    return rows[-1] if rows else None
 
 
 def _find_consent_index(header: list[str]) -> int:

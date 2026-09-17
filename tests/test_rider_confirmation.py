@@ -50,8 +50,16 @@ def signup(stop: str, consent: bool = True, name: str = "Peter Hahn") -> dict:
     }
 
 
-def run(row: int, row_data: dict, prior: dict | None):
+def run(row: int, row_data: dict, prior: dict | None, sheet_rows=None):
     """Call confirm_signup with everything external mocked out.
+
+    Args:
+        sheet_rows: What find_signup_rows_for_phone returns, or a
+            RuntimeError instance to simulate an unreadable sheet.
+            Defaults to an earlier row plus this one, which is the
+            ordinary "they really did sign up twice" case. Pass [row] to
+            model an admin having deleted the earlier row, since the
+            sheet is what decides whether somebody is signed up.
 
     Returns:
         tuple: (result dict, list of (to, body) sent, the
@@ -59,8 +67,18 @@ def run(row: int, row_data: dict, prior: dict | None):
             mock).
     """
     sent: list[tuple[str, str]] = []
+    if sheet_rows is None:
+        sheet_rows = [row - 1, row]
+    lookup = (
+        mock.patch.object(rider_mod, "find_signup_rows_for_phone",
+                          side_effect=sheet_rows)
+        if isinstance(sheet_rows, RuntimeError)
+        else mock.patch.object(rider_mod, "find_signup_rows_for_phone",
+                               return_value=sheet_rows)
+    )
 
-    with mock.patch.object(rider_mod, "get_signup_row", return_value=row_data), \
+    with lookup, \
+         mock.patch.object(rider_mod, "get_signup_row", return_value=row_data), \
          mock.patch.object(rider_mod, "get_next_sunday_date", return_value=SUNDAY), \
          mock.patch.object(rider_mod, "get_rider_confirmation", return_value=prior), \
          mock.patch.object(rider_mod, "get_stop_to_shuttle_map", return_value=STOP_MAP), \
@@ -234,3 +252,44 @@ if failed:
     print(f"{len(failed)} FAILED: {failed}")
     sys.exit(1)
 print(f"All {len(results)} checks passed.")
+
+
+# --- 9. The sheet decides who is signed up ----------------------------
+# Firestore records what we have already told somebody. The sheet
+# records who signed up. Those are different questions, and admins
+# delete rows without Firestore ever hearing about it, so a stored
+# confirmation whose row is gone describes a signup that no longer
+# exists.
+PRIOR = {"row": 500, "stop": "506 E Stoughton", "name": "Peter Hahn"}
+
+result, sent, m_confirmed, m_notice = run(
+    530, signup("FAR"), PRIOR, sheet_rows=[530]
+)
+check("a deleted earlier row means this is a first signup",
+      result["status"] == "sent", str(result))
+check("and they get the real confirmation, not the duplicate notice",
+      sent and "already signed up" not in sent[0][1], sent[0][1] if sent else "(nothing sent)")
+check("which names the stop from the NEW row, not the stale record",
+      sent and "FAR" in sent[0][1] and "Stoughton" not in sent[0][1],
+      sent[0][1] if sent else "(nothing sent)")
+check("and the stale record is overwritten", m_confirmed.called)
+check("no duplicate notice is recorded", not m_notice.called)
+
+result, sent, _, m_notice = run(530, signup("FAR"), PRIOR)
+check("an earlier row that still exists is a real duplicate",
+      result["status"] in {"sent", "skipped"}, str(result))
+check("and gets the duplicate wording",
+      not sent or "already signed up" in sent[0][1],
+      sent[0][1] if sent else "(nothing sent)")
+
+result, sent, _, _ = run(
+    530, signup("FAR"), PRIOR, sheet_rows=RuntimeError("sheet unreadable")
+)
+check("an unreadable sheet keeps the stored confirmation authoritative",
+      not sent or "already signed up" in sent[0][1],
+      sent[0][1] if sent else "(nothing sent)")
+
+print()
+print("The sheet decides: a confirmation whose row was deleted no longer")
+print("blocks a fresh signup, and an unreadable sheet fails closed rather")
+print("than re-texting everyone it could not verify.")
