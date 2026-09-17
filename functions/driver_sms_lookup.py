@@ -32,6 +32,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime
 
+from config.clock import church_today
+
 from db.firestore_client import get_semester_schedule
 from functions.read_riders_sheet import get_next_sunday_date, get_riders_for_sunday
 from functions.read_sheets import find_driver_by_phone, get_routes
@@ -193,7 +195,7 @@ def _build_schedule_reply(driver_name: str, shuttle_ids: list[str]) -> str:
     semester_schedule holds, with no cap - drivers are typically on no
     more than five Sundays, so the list stays short on its own.
     """
-    today = date.today().isoformat()
+    today = church_today().isoformat()
 
     rows: list[str] = []
     for entry in sorted(get_semester_schedule(), key=lambda e: e.get("date") or ""):

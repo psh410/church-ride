@@ -15,6 +15,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
+from config.clock import church_today
+
 from config import settings
 from db.firestore_client import get_semester_schedule
 from functions.send_email import send_email
@@ -92,7 +94,7 @@ def _find_last_week(schedule: list[dict]) -> dict | None:
         dict or None: The most recent entry whose date is on or
             before today, or None if no entry qualifies.
     """
-    today_iso = date.today().isoformat()
+    today_iso = church_today().isoformat()
     past_or_today = [
         entry for entry in schedule if entry.get("date", "") <= today_iso
     ]
@@ -285,7 +287,7 @@ def _get_this_monday() -> str:
         str: The date of the Monday on or before today, in ISO
             "YYYY-MM-DD" format.
     """
-    today = date.today()
+    today = church_today()
     days_since_monday = today.weekday()  # Monday=0 ... Sunday=6
     monday = today - timedelta(days=days_since_monday)
     return monday.strftime("%Y-%m-%d")

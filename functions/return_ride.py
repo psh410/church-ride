@@ -3,8 +3,10 @@
 # the live count (and any names past shuttle capacity) any time by
 # texting REQUESTS. Handled by the /sms-webhook route in cloud_app.py.
 #
-# This is a same-day, standalone signal, independent of the morning
-# shuttle signup (the website form feeding the Routes/Shuttles tabs via
+# Requests are filed against the coming Sunday's service rather than
+# against the day they are sent, so a text at any hour of the week lands
+# on the service it is about. This is a standalone signal, independent
+# of the morning shuttle signup (the website form feeding the Routes/Shuttles tabs via
 # functions/read_riders_sheet.py). Only about half of morning shuttle
 # riders actually take the return shuttle, and people who didn't ride
 # the shuttle that morning often want it going home, so the return
@@ -25,9 +27,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import datetime
 
 from config import settings
+from config.clock import CHICAGO, next_sunday
 from db.firestore_client import (
     get_return_ride_requests_for_date,
     record_disclosure_sent,
@@ -68,11 +71,9 @@ FIRST_CONTACT_DISCLOSURE = (
 # whether they got a shuttle seat or a personal driver before anyone has
 # actually arranged one.
 # Carries the date rather than just "the return ride", so the rider can
-# see which day they actually landed on. Worth the extra characters
-# because of the UTC rollover described in _today(): a text sent late
-# Sunday evening Central files under Monday, and this line is the only
-# place the rider would ever notice that happened. Date format matches
-# build_requests_summary()'s so both messages read the same way.
+# see which service they landed on. Date format matches
+# build_requests_summary()'s so the rider's text and the admin reply
+# read the same way.
 _RIDER_ACK_TEMPLATE = (
     f"{BRAND_PREFIX}\nYou're on the list for the\nreturn ride {{date}}. {OPT_OUT_NOTICE}"
 )
@@ -132,9 +133,8 @@ def build_ride_reply(phone: str, body: str) -> str:
 
     Records the request in Firestore (unless it's a bare "RIDE" with no
     argument, in which case there's nothing to record yet) before
-    returning the acknowledgment. Requests are bucketed by today's
-    actual calendar date, not the next upcoming Sunday - this is a
-    same-day request, not an advance one.
+    returning the acknowledgment. Requests are bucketed by the coming
+    Sunday's service date, computed in Central time.
 
     Args:
         phone: The requester's phone number, E.164 preferred.
@@ -153,7 +153,7 @@ def build_ride_reply(phone: str, body: str) -> str:
     # Read the date once and use it for both the write and the reply, so
     # the rider is never told a different day than the one they were
     # filed under, even across a midnight UTC boundary mid-request.
-    request_date = _today()
+    request_date = _service_sunday()
 
     try:
         result = record_return_ride_request(
@@ -192,8 +192,8 @@ def build_requests_summary(sunday_date: str | None = None) -> str:
 
     Args:
         sunday_date: The date to summarize, in ISO "YYYY-MM-DD" form.
-            Defaults to today's actual calendar date, since these are
-            same-day requests, not advance ones.
+            Defaults to the coming Sunday, the same key build_ride_reply
+            files requests under.
 
     Returns:
         str: The multi-line summary text, ready to send as an SMS body.
@@ -202,7 +202,7 @@ def build_requests_summary(sunday_date: str | None = None) -> str:
         RuntimeError: If the requests can't be read from Firestore.
     """
     if sunday_date is None:
-        sunday_date = _today()
+        sunday_date = _service_sunday()
 
     requests = get_return_ride_requests_for_date(sunday_date)
     total = len(requests)
@@ -242,7 +242,7 @@ def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
     Args:
         phone: The requesting admin's number, E.164 preferred.
         sunday_date: Optional ISO "YYYY-MM-DD" date to summarize.
-            Defaults to today's actual calendar date.
+            Defaults to the coming Sunday.
 
     Returns:
         str: The SMS body to reply with.
@@ -284,19 +284,30 @@ def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
-def _today() -> str:
-    """Today's calendar date in ISO "YYYY-MM-DD" form.
+def _service_sunday() -> str:
+    """The Sunday this request is for, in ISO "YYYY-MM-DD" form.
 
-    Same date.today() the rest of this codebase already uses (see
-    functions/read_riders_sheet.get_next_sunday_date and
-    functions/driver_sms_lookup._build_schedule_reply), which means it
-    inherits the same known quirk: Cloud Run runs in UTC, so a text sent
-    late Sunday night Central time (already Monday UTC) gets bucketed
-    under Monday rather than that Sunday. That's a pre-existing,
-    project-wide issue, not something new here - see
-    claude/return-ride-keyword.md for the note.
+    Requests are filed against the service they are for, not against
+    the day they happen to be sent. Two reasons that matters.
+
+    Cloud Run runs in UTC, so date.today() there is already tomorrow
+    from about 7pm Central. A rider texting Wednesday evening was filed
+    under Thursday, and REQUESTS on Sunday morning would have been
+    looking at a different bucket than the one Saturday night's texts
+    landed in. Computing in Central and rounding to the coming Sunday
+    removes the whole class of problem: every text about one service
+    lands on one key, whatever hour it is sent.
+
+    It also kills the evening boundary this feature used to carry. A
+    text sent 8pm Sunday Central is still Sunday in Chicago, so it stays
+    on that service rather than rolling into Monday, where nobody would
+    ever have looked for it.
+
+    Today counts as the answer when today IS Sunday, so a text during
+    dismissal files against that morning's service rather than the one a
+    week out.
     """
-    return date.today().isoformat()
+    return next_sunday().isoformat()
 
 
 def _display_text(raw_text: str) -> str:

@@ -14,6 +14,8 @@ import base64
 import json
 import logging
 from datetime import date, timedelta
+
+from config.clock import church_today
 from typing import Any
 
 from agents.assignment_agent import run as assignment_run
@@ -140,7 +142,7 @@ def get_next_sunday() -> str:
     Returns:
         str: The date in "YYYY-MM-DD" format.
     """
-    today = date.today()
+    today = church_today()
 
     # date.weekday(): Monday=0 ... Sunday=6. This computes how many days
     # to add to reach the next Sunday, treating "0 days away" (today is

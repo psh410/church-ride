@@ -8,18 +8,19 @@ from __future__ import annotations
 import logging
 import re
 
+from datetime import date, datetime, timedelta
+
 import google.auth
 from googleapiclient.discovery import build
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
 
 from config import settings
+# Central, shared with everything else in this system that asks what day
+# it is. See config/clock.py for why a UTC answer is always wrong here.
+from config.clock import CHICAGO
 from functions.read_sheets import get_sheet_client
 from functions.send_email import send_email
 
 logger = logging.getLogger(__name__)
-
-CHICAGO = ZoneInfo("America/Chicago")
 
 # Verified spreadsheet IDs (the public URLs sometimes get a character
 # mistyped; these are the IDs the service account can actually read).

@@ -6,6 +6,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, timedelta
 
+from config.clock import church_today
+
 from config import settings
 from functions.read_sheets import get_sheet_client
 from functions.send_email import send_email
@@ -158,7 +160,7 @@ def get_next_thursday_date() -> str:
     Returns:
         str: The date, e.g. "9/3/26".
     """
-    today = date.today()
+    today = church_today()
     # weekday(): Monday=0 ... Thursday=3 ... Sunday=6
     days_until_thursday = (3 - today.weekday()) % 7
     thursday = today + timedelta(days=days_until_thursday)

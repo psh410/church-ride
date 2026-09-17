@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 from datetime import date, datetime, time, timedelta
 
+from config.clock import church_today
+
 from config import settings
 from functions.read_sheets import get_routes, get_sheet_client
 
@@ -550,7 +552,7 @@ def get_next_sunday_date() -> str:
     Returns:
         str: The date in "YYYY-MM-DD" format.
     """
-    today = date.today()
+    today = church_today()
 
     # date.weekday(): Monday=0 ... Sunday=6. This computes how many days
     # to add to reach the next Sunday, treating "0 days away" (today is
