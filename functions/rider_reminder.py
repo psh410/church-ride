@@ -1,6 +1,6 @@
 # Saturday night rider reminder, and the SKIP keyword that answers it.
 #
-# At 9:30pm Saturday every consenting shuttle rider gets one text naming
+# At 9:30pm Saturday every consenting rider gets one text naming
 # their stop and pickup time for the morning, ending with "Reply SKIP to
 # cancel". A rider who replies gives up their seat: the cancellation is
 # recorded in Firestore, their signup row is flagged "/cancelled" in the
@@ -18,6 +18,13 @@
 # over the more idiomatic OUT because a good share of these riders are
 # international students and "I'm out" does not travel; see
 # claude/sms-keywords.md.
+#
+# The 9:30pm slot is deliberate and so is what sits after it. The
+# saturday-night-update job, which sends drivers their confirmed rider
+# list, was moved to 10:30pm so this runs first. A cancellation is only
+# worth catching if it lands before the drivers are told who to expect;
+# the other way round, this improves a count nobody reads and leaves the
+# email people actually act on stale.
 #
 # Everyone who signed up hears something. Shuttle riders get their stop
 # and pickup time. Riders whose address is off-route, or who were past
