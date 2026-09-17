@@ -245,15 +245,6 @@ from functions.driver_sms_lookup import DRIVER_LOOKUP_KEYWORDS  # noqa: E402
 check("RESETME doesn't collide with the other keywords",
       not (summary_mod.ADMIN_RESET_KEYWORDS
            & (summary_mod.ADMIN_SUMMARY_KEYWORDS | DRIVER_LOOKUP_KEYWORDS)))
-
-print()
-failed = [label for label, ok in results if not ok]
-if failed:
-    print(f"{len(failed)} FAILED: {failed}")
-    sys.exit(1)
-print(f"All {len(results)} checks passed.")
-
-
 # --- 9. The sheet decides who is signed up ----------------------------
 # Firestore records what we have already told somebody. The sheet
 # records who signed up. Those are different questions, and admins
@@ -289,7 +280,11 @@ check("an unreadable sheet keeps the stored confirmation authoritative",
       not sent or "already signed up" in sent[0][1],
       sent[0][1] if sent else "(nothing sent)")
 
+
 print()
-print("The sheet decides: a confirmation whose row was deleted no longer")
-print("blocks a fresh signup, and an unreadable sheet fails closed rather")
-print("than re-texting everyone it could not verify.")
+failed = [label for label, ok in results if not ok]
+if failed:
+    print(f"{len(failed)} FAILED: {failed}")
+    sys.exit(1)
+print(f"All {len(results)} checks passed.")
+
