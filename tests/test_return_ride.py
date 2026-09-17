@@ -243,6 +243,25 @@ def test_no_keyword_overlaps_with_other_live_keywords():
     check("LIST" in driver_mod.LIST_KEYWORDS, "LIST should be the driver keyword now")
 
 
+def test_rides_is_an_alias_for_ride():
+    for body in ("RIDES", "RIDES John Kim FAR"):
+        check(return_ride_mod.matches_ride_keyword(body), f"{body!r} should match")
+
+
+def test_the_plural_ride_is_not_parsed_as_the_singular_plus_an_s():
+    # Why longest-first matters here rather than being tidiness: matching
+    # RIDE against "RIDES John Kim FAR" would file a rider named
+    # "S JOHN KIM FAR".
+    check(return_ride_mod._matched_ride_keyword("RIDES JOHN KIM FAR") == "RIDES",
+          "the longer spelling should win")
+    check(return_ride_mod.parse_ride_command("RIDES JOHN KIM FAR") == "JOHN KIM FAR",
+          f"got {return_ride_mod.parse_ride_command('RIDES JOHN KIM FAR')!r}")
+    check(return_ride_mod.parse_ride_command("RIDE JOHN KIM FAR") == "JOHN KIM FAR",
+          "the singular should still parse the same way")
+    check(return_ride_mod.parse_ride_command("RIDES") is None,
+          "a bare plural has no argument either")
+
+
 def test_parse_ride_command():
     check(return_ride_mod.parse_ride_command("RIDE John Kim FAR") == "John Kim FAR",
           "should strip the keyword and leading space")
@@ -385,17 +404,39 @@ def _full_lines(names, capacity=28):
 
 
 def test_requests_keyword_matches_with_and_without_an_argument():
-    for body in ("REQUESTS", "REQUESTS ALL", "REQUESTS FULL", "REQUESTS names"):
+    for body in ("REQUESTS", "REQUEST", "REQUESTS ALL", "REQUEST FULL",
+                 "REQUESTS names"):
         check(return_ride_mod.matches_requests_keyword(body), f"{body!r} should match")
-    for body in ("REQUESTSALL", "REQUEST", "REQUESTED", "RIDE"):
+    for body in ("REQUESTSALL", "REQUESTED", "REQ", "RIDE"):
         check(not return_ride_mod.matches_requests_keyword(body),
               f"{body!r} should NOT match")
 
 
+def test_the_singular_is_an_alias_for_the_plural():
+    # Nobody should have to remember whether the keyword has an S while
+    # standing in a church lobby.
+    check(return_ride_mod.matches_requests_keyword("REQUEST"),
+          "REQUEST should work as well as REQUESTS")
+    check(not return_ride_mod.wants_full_list("REQUEST"),
+          "bare REQUEST should give the short summary, same as REQUESTS")
+    check(return_ride_mod.wants_full_list("REQUEST ALL"),
+          "REQUEST ALL should give the full list")
+
+
+def test_the_plural_is_not_read_as_the_singular_plus_an_argument():
+    # REQUESTS begins with REQUEST, so matching the short spelling first
+    # would leave "S ALL" as the argument.
+    check(return_ride_mod._matched_requests_keyword("REQUESTS ALL") == "REQUESTS",
+          "the longer spelling should win")
+    check(return_ride_mod._matched_requests_keyword("REQUESTS") == "REQUESTS",
+          "a bare plural should match the plural")
+
+
 def test_only_an_argument_asks_for_the_full_list():
-    check(not return_ride_mod.wants_full_list("REQUESTS"),
-          "bare REQUESTS should give the short summary")
-    for body in ("REQUESTS ALL", "REQUESTS FULL", "REQUESTS anything"):
+    for body in ("REQUESTS", "REQUEST"):
+        check(not return_ride_mod.wants_full_list(body),
+              f"bare {body!r} should give the short summary")
+    for body in ("REQUESTS ALL", "REQUEST FULL", "REQUESTS anything"):
         check(return_ride_mod.wants_full_list(body),
               f"{body!r} should ask for the full list")
 

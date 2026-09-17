@@ -45,14 +45,20 @@ logger = logging.getLogger(__name__)
 # a name and dorm/address, e.g. "RIDE John Kim FAR".
 RIDE_KEYWORD = "RIDE"
 
+# RIDES plural is accepted too. This one is not cosmetic: because the
+# keyword is followed by free text, matching RIDE against "RIDES John
+# Kim FAR" would parse the name as "S John Kim FAR" and file it that
+# way. The spellings are matched longest first so that cannot happen.
+RIDE_KEYWORDS = {RIDE_KEYWORD, "RIDES"}
+
 # What Dae/Sarah text to pull the live count. Admin-allowlist gated, same
 # as ADMIN_SUMMARY_KEYWORDS (UPDATE/STATUS) in functions/send_admin_summary.py.
 REQUESTS_KEYWORD = "REQUESTS"
 
-# Kept as a set because cloud_app and the collision tests both read it
-# that way, and because a future alias belongs here rather than in a
-# second place.
-REQUESTS_KEYWORDS = {REQUESTS_KEYWORD}
+# REQUEST singular is accepted too. Nobody should have to remember
+# whether the keyword has an S on the end while standing in a church
+# lobby, and the plural is easy to drop when typing one-handed.
+REQUESTS_KEYWORDS = {REQUESTS_KEYWORD, "REQUEST"}
 
 # Roughly two SMS segments per part. Twilio would happily concatenate a
 # much longer body, but a phone showing one enormous bubble is harder to
@@ -119,14 +125,6 @@ _SAVE_FAILED_REPLY = (
 def matches_ride_keyword(body: str) -> bool:
     """Return whether an inbound message body is a RIDE request.
 
-    RIDE has to be matched as a whole word - either exactly RIDE with
-    nothing else, or RIDE followed by a space - rather than a plain
-    "starts with" check. The driver keyword this used to collide with
-    (RIDERS) is now LIST, so there's nothing live sharing this prefix
-    today, but matching it properly here means the next keyword that
-    happens to start with the same letters doesn't get silently
-    swallowed by this one.
-
     Args:
         body: The inbound message body, already uppercased and
             stripped, the way cloud_app.py's webhook prepares it before
@@ -135,36 +133,72 @@ def matches_ride_keyword(body: str) -> bool:
     Returns:
         bool: True if this message should be handled as a RIDE request.
     """
-    return body == RIDE_KEYWORD or body.startswith(f"{RIDE_KEYWORD} ")
+    return _matched_ride_keyword(body) is not None
+
+
+def _matched_ride_keyword(body: str) -> str | None:
+    """Which RIDE spelling this body used, if any.
+
+    Matched as a whole word - the keyword exactly, or the keyword
+    followed by a space - rather than a plain "starts with" check. The
+    driver keyword this used to collide with (RIDERS) is now LIST, so
+    nothing live shares this prefix today, but matching it properly
+    means the next keyword starting with the same letters is not
+    silently swallowed.
+
+    Longest spelling first, because RIDES begins with RIDE. Getting that
+    backwards would parse "RIDES John Kim FAR" as a rider named "S John
+    Kim FAR" and file it under that name.
+    """
+    for keyword in sorted(RIDE_KEYWORDS, key=len, reverse=True):
+        if body == keyword or body.startswith(f"{keyword} "):
+            return keyword
+    return None
+
+
+def _matched_requests_keyword(body: str) -> str | None:
+    """Which REQUESTS spelling this body used, if any.
+
+    Whole-word matched for the same reason RIDE is: the keyword exactly,
+    or the keyword followed by a space. A plain "starts with" check
+    would swallow any future keyword sharing the prefix.
+
+    Longest first, because REQUESTS itself begins with REQUEST. Matching
+    the short one first would leave "S ALL" as the argument, which
+    happens to behave correctly today and would stop doing so the moment
+    the argument is ever read rather than merely tested for emptiness.
+    """
+    for keyword in sorted(REQUESTS_KEYWORDS, key=len, reverse=True):
+        if body == keyword or body.startswith(f"{keyword} "):
+            return keyword
+    return None
 
 
 def matches_requests_keyword(body: str) -> bool:
-    """Whether an inbound body is a REQUESTS command, with or without an
-    argument.
-
-    Whole-word matched for the same reason RIDE is: "REQUESTS" exactly,
-    or "REQUESTS " followed by something. A plain "starts with" check
-    would swallow any future keyword sharing the prefix.
+    """Whether an inbound body is a REQUESTS command, argument or not.
 
     Args:
         body: The inbound body, already uppercased and stripped.
     """
-    return body == REQUESTS_KEYWORD or body.startswith(f"{REQUESTS_KEYWORD} ")
+    return _matched_requests_keyword(body) is not None
 
 
 def wants_full_list(body: str) -> bool:
     """Whether this REQUESTS text asked for the full rider list.
 
     Any argument at all counts. Deliberately forgiving: an admin who
-    types "REQUESTS ALL", "REQUESTS FULL", "REQUESTS NAMES" or fumbles
-    it entirely gets the long version, which is never harmful, rather
-    than the short one with no hint that the argument was ignored.
+    types "REQUESTS ALL", "REQUEST FULL", "REQUESTS NAMES" or fumbles it
+    entirely gets the long version, which is never harmful, rather than
+    the short one with no hint that the argument was ignored.
     """
-    return bool(body[len(REQUESTS_KEYWORD):].strip())
+    keyword = _matched_requests_keyword(body)
+    if keyword is None:
+        return False
+    return bool(body[len(keyword):].strip())
 
 
 def parse_ride_command(body: str) -> str | None:
-    """Return the text after "RIDE ", or None if there isn't any.
+    """Return the text after the keyword, or None if there isn't any.
 
     Args:
         body: The inbound message body, already uppercased and
@@ -174,8 +208,10 @@ def parse_ride_command(body: str) -> str | None:
         str or None: The trailing name/address text, or None when the
             rider texted the bare keyword with nothing after it.
     """
-    remainder = body[len(RIDE_KEYWORD):].strip()
-    return remainder or None
+    keyword = _matched_ride_keyword(body)
+    if keyword is None:
+        return None
+    return body[len(keyword):].strip() or None
 
 
 def build_ride_reply(phone: str, body: str) -> str:
