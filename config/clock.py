@@ -48,3 +48,12 @@ def next_sunday(today: date | None = None) -> date:
     # weekday(): Monday=0 ... Sunday=6. The modulo keeps "today is
     # Sunday" at zero days away rather than wrapping to seven.
     return today + timedelta(days=(6 - today.weekday()) % 7)
+
+
+def is_sunday(today: date | None = None) -> bool:
+    """Whether it is Sunday in Central.
+
+    Args:
+        today: Optional date override for tests.
+    """
+    return (today or church_today()).weekday() == 6

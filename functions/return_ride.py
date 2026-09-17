@@ -30,7 +30,7 @@ import logging
 from datetime import datetime
 
 from config import settings
-from config.clock import CHICAGO, next_sunday
+from config.clock import CHICAGO, is_sunday, next_sunday
 from db.firestore_client import (
     get_return_ride_requests_for_date,
     record_disclosure_sent,
@@ -83,6 +83,23 @@ _RIDER_ACK_TEMPLATE = (
 # in the moment they need it to work.
 _RIDE_FORMAT_HINT = (
     f"{BRAND_PREFIX}\nText RIDE followed by your name and dorm or address."
+)
+
+# RIDE only answers on Sunday. The list is for one service, and a
+# request sent on Tuesday would sit on Sunday's list all week counting
+# against the 28 seats, long after whoever sent it had forgotten. Rather
+# than silently accepting it, say when to come back: the rider is
+# clearly trying to use this, and silence or a false confirmation are
+# both worse than a plain answer.
+#
+# Numbers on the ADMIN_SMS_PHONES allowlist are exempt, so this can be
+# tested on a Wednesday without waiting for a service. Same allowlist
+# that already gates UPDATE and REQUESTS, so it adds no new surface: a
+# number that can already read the counts can also put a test row in
+# them.
+_NOT_OPEN_REPLY = (
+    f"{BRAND_PREFIX}\nReturn ride sign-up opens Sunday after service. "
+    f"Text RIDE then. {OPT_OUT_NOTICE}"
 )
 
 _SAVE_FAILED_REPLY = (
@@ -141,11 +158,24 @@ def build_ride_reply(phone: str, body: str) -> str:
         body: The inbound message body, already uppercased and
             stripped. Expected to satisfy matches_ride_keyword().
 
+    Answers only on Sunday, except for admin numbers, which are let
+    through any day so this can be tested without waiting for a service.
+    On any other day a normal number gets a reply saying when sign-up
+    opens, and nothing is recorded, so a request made days early cannot
+    sit on Sunday's list counting against shuttle capacity.
+
     Returns:
         str: The SMS body to reply with. Always non-empty, so a rider
             who texts this never gets silence back, unlike most other
             keywords in this system.
     """
+    # Day check first, ahead of the format hint. Someone texting a bare
+    # RIDE on a Wednesday needs to know it is not open yet, not how to
+    # format a request they cannot make.
+    if not is_sunday() and not _is_test_exempt(phone):
+        logger.info("RIDE from %s outside Sunday; replying not open.", phone)
+        return _NOT_OPEN_REPLY
+
     raw_text = parse_ride_command(body)
     if raw_text is None:
         return _RIDE_FORMAT_HINT
@@ -284,6 +314,23 @@ def build_requests_reply(phone: str, sunday_date: str | None = None) -> str:
 # --------------------------------------------------------------------------
 # Internal helpers
 # --------------------------------------------------------------------------
+def _is_test_exempt(phone: str) -> bool:
+    """Whether this number may use RIDE outside Sunday.
+
+    Admin allowlist only, and it fails closed: if the check itself
+    raises, the caller is treated as an ordinary rider and the day gate
+    applies. An admin who cannot test is a nuisance; a broken gate that
+    lets the whole church sign up on a Tuesday is a real problem.
+    """
+    try:
+        from functions.send_admin_summary import is_admin_phone
+
+        return bool(is_admin_phone(phone))
+    except Exception as exc:
+        logger.warning("Could not check admin exemption for %s: %s", phone, exc)
+        return False
+
+
 def _service_sunday() -> str:
     """The Sunday this request is for, in ISO "YYYY-MM-DD" form.
 

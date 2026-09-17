@@ -255,14 +255,74 @@ def test_parse_ride_command():
 # --------------------------------------------------------------------------
 # functions.return_ride: build_ride_reply (Firestore mocked)
 # --------------------------------------------------------------------------
+# RIDE only answers on Sunday, so every test below pins the day rather
+# than inheriting whatever day it happens to run on. Without that these
+# passed on Sundays and failed the rest of the week, which is a suite
+# that lies to you in both directions.
+def _on_sunday():
+    return mock.patch.object(return_ride_mod, "is_sunday", return_value=True)
+
+
+def _not_sunday():
+    return mock.patch.object(return_ride_mod, "is_sunday", return_value=False)
+
+
+def _not_admin():
+    return mock.patch.object(return_ride_mod, "_is_test_exempt", return_value=False)
+
+
+def test_ride_outside_sunday_says_when_to_come_back():
+    with _not_sunday(), _not_admin(), \
+         mock.patch.object(return_ride_mod, "record_return_ride_request") as record:
+        reply = return_ride_mod.build_ride_reply("+15551234", "RIDE John Kim FAR")
+
+    check("opens Sunday" in reply,
+          f"a weekday request should say when sign-up opens: {reply!r}")
+    check(not record.called,
+          "a weekday request must not be recorded, or it sits on Sunday's "
+          "list all week counting against the 28 seats")
+    check(OPT_OUT_NOTICE in reply, "the reply should carry the opt-out notice")
+
+
+def test_a_bare_ride_outside_sunday_gets_the_day_answer_not_the_format_hint():
+    # Someone texting on a Wednesday needs to know it is not open yet,
+    # not how to format a request they cannot make.
+    with _not_sunday(), _not_admin():
+        reply = return_ride_mod.build_ride_reply("+15551234", "RIDE")
+    check("opens Sunday" in reply, f"expected the day answer, got {reply!r}")
+
+
+def test_an_admin_can_test_on_any_day():
+    with _not_sunday(), \
+         mock.patch.object(return_ride_mod, "_is_test_exempt", return_value=True), \
+         mock.patch.object(
+             return_ride_mod, "record_return_ride_request",
+             return_value={"position": 1, "needs_driver": False, "is_new": True},
+         ) as record:
+        reply = return_ride_mod.build_ride_reply("+17034010571", "RIDE Peter Hahn FAR")
+
+    check(record.called, "an admin should be able to exercise this off-Sunday")
+    check("on the list" in reply, f"admin should get the real ack, got {reply!r}")
+
+
+def test_the_exemption_fails_closed():
+    # If the allowlist check itself breaks, an ordinary rider must still
+    # be gated. An admin who cannot test is a nuisance; a gate that
+    # lets the whole church sign up on a Tuesday is a real problem.
+    with mock.patch.dict("sys.modules", {"functions.send_admin_summary": None}):
+        check(return_ride_mod._is_test_exempt("+15551234") is False,
+              "a broken admin check must not open the gate")
+
+
 def test_build_ride_reply_bare_keyword_gets_format_hint():
-    reply = return_ride_mod.build_ride_reply("+15551234", "RIDE")
+    with _on_sunday():
+        reply = return_ride_mod.build_ride_reply("+15551234", "RIDE")
     check(reply.startswith(BRAND_PREFIX), "format hint should carry the brand prefix")
     check("RIDE followed by" in reply, "format hint should explain the format")
 
 
 def test_build_ride_reply_normal_request_gets_ack_with_opt_out():
-    with mock.patch.object(
+    with _on_sunday(), mock.patch.object(
         return_ride_mod, "record_return_ride_request",
         return_value={"position": 5, "needs_driver": False, "is_new": True},
     ) as mocked:
@@ -284,7 +344,7 @@ def test_build_ride_reply_normal_request_gets_ack_with_opt_out():
     # Same message whether they're comfortably under capacity or over it -
     # no reason to tell someone by text whether they got a shuttle seat
     # or a personal driver before anyone has arranged one.
-    with mock.patch.object(
+    with _on_sunday(), mock.patch.object(
         return_ride_mod, "record_return_ride_request",
         return_value={"position": 40, "needs_driver": True, "is_new": True},
     ):
@@ -293,7 +353,7 @@ def test_build_ride_reply_normal_request_gets_ack_with_opt_out():
 
 
 def test_build_ride_reply_save_failure_still_replies():
-    with mock.patch.object(
+    with _on_sunday(), mock.patch.object(
         return_ride_mod, "record_return_ride_request",
         side_effect=RuntimeError("firestore hiccup"),
     ):
