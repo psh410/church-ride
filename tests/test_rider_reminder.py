@@ -33,13 +33,14 @@ def check(condition: bool, message: str) -> None:
         _FAILURES.append(message)
 
 
-def _rider(name="John Kim", phone="217-555-0100", stop="FAR", consent=True):
+def _rider(name="John Kim", phone="217-555-0100", stop="FAR", consent=True,
+           shuttle_id="shuttle_1"):
     return {
         "name": name,
         "email": None,
         "phone": phone,
         "stop": stop,
-        "shuttle_id": "shuttle_1",
+        "shuttle_id": shuttle_id,
         "grade": "",
         "submitted_at": "2026-09-17T10:00:00",
         "sms_consent": consent,
@@ -108,6 +109,70 @@ def test_reminder_omits_time_when_the_stop_has_none():
     msg = rr.build_rider_reminder("John Kim", "Other", None, SUNDAY)
     check("Other" in msg, "reminder should still name the stop")
     check("None" not in msg, f"missing time should be omitted, not printed: {msg!r}")
+
+
+def test_a_rider_with_no_shuttle_gets_a_general_note():
+    msg = rr.build_rider_reminder("John Kim", "1002 S Lincoln", None,
+                                  SUNDAY, on_shuttle=False)
+    check("contact you" in msg, f"should say someone will be in touch: {msg!r}")
+    check("SKIP" in msg, "they should be able to cancel too, which frees a driver")
+    check("9/20/26" in msg, "should still name the date")
+    check(len(msg) <= 160, f"should be one segment, got {len(msg)}")
+
+
+def test_a_rider_with_no_shuttle_is_never_told_a_stop_or_a_time():
+    # Their ride is arranged by hand and none of those details exist
+    # here. Naming a stop and a time would send them somewhere no van is
+    # going, which is worse than saying nothing.
+    msg = rr.build_rider_reminder("John Kim", "FAR", "9:05 AM",
+                                  SUNDAY, on_shuttle=False)
+    check("FAR" not in msg, f"should not name a stop: {msg!r}")
+    check("9:05" not in msg, f"should not name a pickup time: {msg!r}")
+
+
+def test_everyone_signed_up_is_texted_not_only_shuttle_riders():
+    riders = [
+        _rider(name="On Shuttle", phone="217-555-0100"),
+        _rider(name="Off Route", phone="217-555-0200",
+               stop="1002 S Lincoln", shuttle_id=None),
+    ]
+    result, sent = _run_send(riders)
+    check(result["sent"] == 2, f"both should be texted, got {result['sent']}")
+    bodies = {to: body for to, body in sent}
+    check("Pickup at" in bodies["+12175550100"], "the shuttle rider gets pickup details")
+    check("contact you" in bodies["+12175550200"], "the other gets the general note")
+
+
+def test_duplicate_rows_are_not_texted_again():
+    # This reminder used to cover shuttle riders only, and a row reading
+    # "FAR/duplicate" maps to no stop so it was excluded for free.
+    # Including non-shuttle riders pulls those rows back in, and texting
+    # one is a second message to somebody already told they signed up.
+    riders = [
+        _rider(name="Real", phone="217-555-0100"),
+        _rider(name="Dupe", phone="217-555-0200",
+               stop="FAR/duplicate", shuttle_id=None),
+    ]
+    result, sent = _run_send(riders)
+    check(result["sent"] == 1, f"only the real signup should be texted, got {result['sent']}")
+    check(result["skipped"] == 1, "the duplicate row should be skipped")
+    check(all(to != "+12175550200" for to, _ in sent), "the duplicate must not be texted")
+
+
+def test_sheet_cancelled_rows_are_not_texted():
+    riders = [_rider(name="Gone", phone="217-555-0200",
+                     stop="FAR/cancelled", shuttle_id=None)]
+    result, sent = _run_send(riders)
+    check(sent == [], "a cancelled row must not be texted")
+    check(result["skipped"] == 1, "it should count as skipped")
+
+
+def test_an_address_containing_a_slash_is_not_read_as_a_flag():
+    # Riders do type addresses like "1002 S Lincoln Apt 1/2".
+    check(rr._should_skip_row("1002 S Lincoln Apt 1/2") is None,
+          "a stray slash is not a flag")
+    check(rr._should_skip_row("FAR/driver") is None,
+          "a /driver row is a real rider who needs the general note")
 
 
 def test_cancel_confirmation_names_the_date_and_nothing_else():

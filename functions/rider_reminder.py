@@ -19,9 +19,12 @@
 # international students and "I'm out" does not travel; see
 # claude/sms-keywords.md.
 #
-# Shuttle riders only. Riders flagged "/driver" have a personal driver
-# arranged by hand and none of those details live in this system, so a
-# text naming a stop and a pickup time would be wrong for them.
+# Everyone who signed up hears something. Shuttle riders get their stop
+# and pickup time. Riders whose address is off-route, or who were past
+# capacity at signup, get a general note that someone will contact them,
+# because their ride is arranged by hand and none of those details live
+# in this system. Naming a stop and a time for them would be worse than
+# saying nothing, since they would turn up where no van is going.
 
 from __future__ import annotations
 
@@ -150,24 +153,53 @@ def build_skip_reply(phone: str, sunday_date: str | None = None) -> str | None:
 
 
 def build_rider_reminder(
-    name: str, stop: str, pickup_time: str | None, sunday_date: str
+    name: str,
+    stop: str,
+    pickup_time: str | None,
+    sunday_date: str,
+    on_shuttle: bool = True,
 ) -> str:
     """Build one rider's Saturday night reminder.
+
+    Two shapes. A shuttle rider gets their stop and pickup time, which
+    is the whole point of the reminder. A rider not on a shuttle gets a
+    general note that someone will be in touch, because their ride is
+    arranged by hand and none of those details exist in this system.
+    Naming a stop and a time for them would be worse than saying
+    nothing, since they would turn up somewhere no van is going.
+
+    Both get the cancellation instruction. A non-shuttle rider
+    cancelling is arguably the more valuable of the two, since it frees
+    up a person who was about to spend their Sunday driving.
 
     Args:
         name: The rider's full name from the sheet; only the first name
             is used, matching every other rider-facing message.
-        stop: Their campus stop.
+        stop: Their campus stop. Ignored when on_shuttle is False.
         pickup_time: Time from the Routes tab, or None if the stop has
             no time listed, in which case the time is left out rather
             than guessed at.
         sunday_date: The service date, ISO "YYYY-MM-DD".
+        on_shuttle: False for riders whose address is off-route or who
+            were past shuttle capacity at signup.
 
     Returns:
         str: The SMS body, one segment.
     """
     when = _format_short_date(sunday_date)
     first = _first_name(name)
+
+    if not on_shuttle:
+        # "Sunday" is dropped rather than the contact line: the date
+        # already says which day, and losing it is what keeps this to one
+        # segment. A first name of twelve characters or more still tips
+        # it to two, which costs one extra segment on one text and is not
+        # worth weakening the sentence for.
+        return (
+            f"{BRAND_PREFIX} Hi {first}, you're on the list for {when}. "
+            f"Someone will contact you about your ride. "
+            f"Reply {SKIP_KEYWORD} to cancel. {OPT_OUT_NOTICE}"
+        )
 
     if pickup_time:
         where = f"Pickup at {stop}, {pickup_time}."
@@ -183,11 +215,16 @@ def build_rider_reminder(
 def send_saturday_rider_reminders(
     sunday_date: str | None = None, dry_run: bool = False
 ) -> dict:
-    """Text every consenting shuttle rider their pickup details.
+    """Text every consenting rider about their ride.
+
+    Shuttle riders get their stop and pickup time; everyone else gets a
+    general note that someone will be in touch. Both carry the SKIP
+    instruction.
 
     Skips riders with no SMS consent (the consent gate fails closed, so
     an absent consent column means nobody is texted), riders with no
-    usable phone number, and riders who have opted out.
+    usable phone number, riders who have opted out, and rows flagged
+    duplicate or cancelled on the sheet.
 
     Args:
         sunday_date: Optional ISO "YYYY-MM-DD" override. Defaults to the
@@ -206,13 +243,23 @@ def send_saturday_rider_reminders(
     if sunday_date is None:
         sunday_date = get_next_sunday_date()
 
-    riders = get_riders_for_sunday(sunday_date)
+    # include_non_shuttle pulls in riders whose address is off-route and
+    # riders who were past capacity at signup. Both have a ride arranged
+    # by hand, and both should hear something on Saturday night.
+    riders = get_riders_for_sunday(sunday_date, include_non_shuttle=True)
     stop_times = get_stop_times_map()
 
     sent, skipped, failed, details = 0, 0, 0, []
 
     for rider in riders:
         name = rider.get("name", "")
+        stop = rider.get("stop", "")
+
+        flagged = _should_skip_row(stop)
+        if flagged:
+            skipped += 1
+            details.append(f"{name}: {flagged} row")
+            continue
 
         if not rider.get("sms_consent"):
             skipped += 1
@@ -236,14 +283,19 @@ def send_saturday_rider_reminders(
             # level anyway, so attempting the send is safe.
             logger.warning("Opt-out check failed for %s: %s", phone, exc)
 
+        on_shuttle = bool(rider.get("shuttle_id"))
         body = build_rider_reminder(
-            name, rider.get("stop", ""), stop_times.get(rider.get("stop", "")),
+            name,
+            stop,
+            stop_times.get(stop),
             sunday_date,
+            on_shuttle=on_shuttle,
         )
 
         if dry_run:
             sent += 1
-            details.append(f"{name} ({phone}): WOULD SEND\n    {body}")
+            kind = "shuttle" if on_shuttle else "no shuttle"
+            details.append(f"{name} ({phone}, {kind}): WOULD SEND\n    {body}")
             continue
 
         if send_sms(phone, body):
@@ -328,6 +380,32 @@ def _flag_sheet_row(normalized_phone: str, sunday_date: str) -> None:
             sunday_date,
             exc,
         )
+
+
+# Flags the Apps Script and the SKIP handler append to a signup's campus
+# address cell, as "FAR/duplicate". Matched explicitly rather than
+# treating any "/" as a flag, because riders do type addresses like
+# "1002 S Lincoln Apt 1/2".
+_SKIP_FLAGS = {"duplicate", "cancelled"}
+
+
+def _flags(stop: str) -> set[str]:
+    """Lowercased flags appended to a campus address cell."""
+    return {part.strip().lower() for part in str(stop).split("/")[1:] if part.strip()}
+
+
+def _should_skip_row(stop: str) -> str | None:
+    """Why this signup must not be texted, or None if it should be.
+
+    Duplicates matter now in a way they did not before. This reminder
+    used to cover shuttle riders only, and a row reading "FAR/duplicate"
+    maps to no stop so it was excluded for free. Including non-shuttle
+    riders pulls those rows back in, and texting one would be a second
+    message to somebody already told they are signed up.
+    """
+    for flag in sorted(_flags(stop) & _SKIP_FLAGS):
+        return flag
+    return None
 
 
 def _format_short_date(iso_date: str) -> str:
