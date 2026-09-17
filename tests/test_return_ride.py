@@ -409,15 +409,29 @@ def test_the_full_list_is_sorted_by_what_the_rider_typed():
           f"should be alphabetical regardless of case: {entries}")
 
 
-def test_riders_needing_drivers_are_grouped_and_sorted_too():
+def test_the_full_list_is_not_split_into_shuttle_and_driver():
+    # Seats go to whoever boards first, so signup order does not decide
+    # who ends up on a shuttle. Splitting the list on that basis would
+    # put a confident label on a guess.
     names = [f"Rider {i:02d}" for i in range(1, 31)]
     lines = _full_lines(names, capacity=28)
-    check("Need driver:" in lines, "the overflow group should have a heading")
-    tail = lines[lines.index("Need driver:") + 1:]
-    check(len(tail) == 2, f"two riders past 28, got {len(tail)}")
-    names_in_tail = [l.split(". ", 1)[1] for l in tail]
-    check(names_in_tail == sorted(names_in_tail),
-          f"the overflow group should be sorted too: {names_in_tail}")
+    check("Need driver:" not in lines,
+          f"there should be no shuttle/driver split: {lines[:3]}")
+    entries = [l for l in lines if l[0].isdigit()]
+    check(len(entries) == 30, f"all 30 riders should be listed, got {len(entries)}")
+
+
+def test_the_full_list_header_still_says_how_many_are_past_capacity():
+    names = [f"Rider {i:02d}" for i in range(1, 31)]
+    header = _full_lines(names, capacity=28)[0]
+    check("30" in header, f"header should carry the total: {header!r}")
+    check("2 past the 28" in header,
+          f"header should say how many exceed the seats: {header!r}")
+
+
+def test_the_full_list_header_stays_quiet_under_capacity():
+    header = _full_lines([f"Rider {i:02d}" for i in range(1, 11)])[0]
+    check("past" not in header, f"nothing exceeds capacity: {header!r}")
 
 
 def test_numbering_runs_down_the_printed_list_not_by_seat_position():
@@ -482,57 +496,65 @@ def test_the_disclosure_lands_on_the_last_part():
           "and not buried in an earlier part they have scrolled past")
 
 
+def _summary_for(count):
+    requests = [_fake_request(i, i > 28, f"Rider {i:02d}") for i in range(1, count + 1)]
+    with mock.patch.object(
+        return_ride_mod, "get_return_ride_requests_for_date", return_value=requests
+    ):
+        return return_ride_mod.build_requests_summary("2026-09-13")
+
+
 def test_requests_summary_zero_requested():
-    with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=[]):
+    summary = _summary_for(0)
+    check("nobody yet" in summary, f"expected nobody yet, got: {summary!r}")
+
+
+def test_requests_summary_under_capacity_reports_the_count_and_the_seats():
+    summary = _summary_for(10)
+    check("10 requested" in summary, f"unexpected counts line: {summary!r}")
+    check("shuttles hold 28" in summary,
+          f"should say what the shuttles hold: {summary!r}")
+    check("personal driver" not in summary,
+          "nobody needs a driver under capacity")
+
+
+def test_requests_summary_at_exactly_capacity_needs_no_driver():
+    summary = _summary_for(28)
+    check("28 requested" in summary, f"unexpected counts line: {summary!r}")
+    check("personal driver" not in summary,
+          f"28 fits, so no driver is needed: {summary!r}")
+
+
+def test_requests_summary_over_capacity_says_how_many_drivers():
+    summary = _summary_for(31)
+    check("31 requested" in summary, f"unexpected counts line: {summary!r}")
+    check("3 need a personal driver" in summary,
+          f"should say how many rides to arrange: {summary!r}")
+
+
+def test_requests_summary_names_nobody():
+    # Seats go to whoever boards first, so the system cannot know which
+    # particular people will be left for a personal driver. Naming any
+    # of them would be inventing an answer, which is what the old
+    # "Over: ..." line did.
+    summary = _summary_for(31)
+    for forbidden in ("Over:", "Rider 29", "Rider 30", "Rider 31"):
+        check(forbidden not in summary,
+              f"the short summary should name nobody, found {forbidden!r}: {summary!r}")
+
+
+def test_overflow_is_recomputed_rather_than_read_from_stored_flags():
+    # needs_driver is written once at signup and never revisited, so
+    # after a cancellation it describes a headcount that no longer
+    # exists. Here every stored flag says "needs a driver" while the
+    # actual total fits comfortably.
+    requests = [_fake_request(i, True, f"Rider {i:02d}") for i in range(1, 6)]
+    with mock.patch.object(
+        return_ride_mod, "get_return_ride_requests_for_date", return_value=requests
+    ):
         summary = return_ride_mod.build_requests_summary("2026-09-13")
-
-    check("0 requested" in summary, f"expected 0 requested, got: {summary!r}")
-    check("Over:" not in summary, "should have no Over line at zero requests")
-
-
-def test_requests_summary_under_capacity_has_no_over_line():
-    requests = [_fake_request(i, False, f"Rider {i}") for i in range(1, 11)]
-    with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=requests):
-        summary = return_ride_mod.build_requests_summary("2026-09-13")
-
-    check("10 requested (10 shuttle, 0 need drivers)" in summary,
-          f"unexpected counts line: {summary!r}")
-    check("Over:" not in summary, "should have no Over line under capacity")
-
-
-def test_requests_summary_exactly_at_capacity_has_no_over_line():
-    requests = [_fake_request(i, False, f"Rider {i}") for i in range(1, 29)]
-    with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=requests):
-        summary = return_ride_mod.build_requests_summary("2026-09-13")
-
-    check("28 requested (28 shuttle, 0 need drivers)" in summary,
-          f"unexpected counts line: {summary!r}")
-    check("Over:" not in summary, "should have no Over line at exactly capacity")
-
-
-def test_requests_summary_over_capacity_lists_overflow():
-    requests = [_fake_request(i, False, f"Rider {i}") for i in range(1, 29)]
-    requests += [_fake_request(29, True, "John Kim FAR"), _fake_request(30, True, "Tom Suh PAR")]
-    with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=requests):
-        summary = return_ride_mod.build_requests_summary("2026-09-13")
-
-    check("30 requested (28 shuttle, 2 need drivers)" in summary,
-          f"unexpected counts line: {summary!r}")
-    check("Over: John Kim FAR, Tom Suh PAR" in summary,
-          f"expected both overflow names listed, got: {summary!r}")
-
-
-def test_requests_summary_truncates_long_overflow_list():
-    overflow = [_fake_request(28 + i, True, f"Rider {i}") for i in range(1, 12)]  # 11 overflow
-    requests = [_fake_request(i, False, f"Shuttle rider {i}") for i in range(1, 29)] + overflow
-    with mock.patch.object(return_ride_mod, "get_return_ride_requests_for_date", return_value=requests):
-        summary = return_ride_mod.build_requests_summary("2026-09-13")
-
-    check("+3 more" in summary,
-          f"expected truncation tail for 11 overflow names shown {return_ride_mod.MAX_OVERFLOW_NAMES_SHOWN} "
-          f"at a time, got: {summary!r}")
-    check(summary.count("Rider 1") + summary.count("Rider 2") <= return_ride_mod.MAX_OVERFLOW_NAMES_SHOWN,
-          "should not list more than MAX_OVERFLOW_NAMES_SHOWN full names")
+    check("personal driver" not in summary,
+          f"5 riders fit in 28 seats whatever the stored flags say: {summary!r}")
 
 
 def test_requests_summary_never_carries_opt_out_notice_inline():

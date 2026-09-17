@@ -54,11 +54,6 @@ REQUESTS_KEYWORD = "REQUESTS"
 # second place.
 REQUESTS_KEYWORDS = {REQUESTS_KEYWORD}
 
-# How many names to list on the "Over" line before truncating, so a bare
-# REQUESTS stays short on a busy Sunday. Anyone wanting the rest texts
-# "REQUESTS ALL".
-MAX_OVERFLOW_NAMES_SHOWN = 8
-
 # Roughly two SMS segments per part. Twilio would happily concatenate a
 # much longer body, but a phone showing one enormous bubble is harder to
 # read on a sidewalk than a few numbered ones, and a failed segment in
@@ -242,21 +237,24 @@ def build_ride_reply(phone: str, body: str) -> str:
 
 
 def build_requests_summary(sunday_date: str | None = None) -> str:
-    """Build the REQUESTS reply: live return ride count, with any overflow.
+    """Build the short REQUESTS reply: how many, and how many need a driver.
 
     Produces something like:
 
         CFC Rides:
-        Returns for 9/13/26: 31
-        requested (28 shuttle, 3
-        need drivers)
-        Over: John Kim FAR, Sarah
-        Lee 1002 S Lincoln, Tom
-        Suh PAR
+        Returns for 9/20/26: 31 requested.
+        Shuttles hold 28, so 3 need
+        a personal driver.
 
-    The "Over" line is left off entirely when nobody has gone past
-    capacity yet, and truncates to MAX_OVERFLOW_NAMES_SHOWN entries plus
-    a "+N more" tail on a busy day.
+    No names. Seats go to whoever boards first, so the system cannot say
+    which particular people will be left for a personal driver, and
+    naming any of them would be inventing an answer. What it can say is
+    how many rides to arrange. Text "REQUESTS ALL" for everyone's names.
+
+    The overflow is computed from the total against capacity rather than
+    by counting stored needs_driver flags. Those flags are written once
+    at signup and never revisited, so after a cancellation they describe
+    a headcount that no longer exists.
 
     Args:
         sunday_date: The date to summarize, in ISO "YYYY-MM-DD" form.
@@ -272,31 +270,24 @@ def build_requests_summary(sunday_date: str | None = None) -> str:
     if sunday_date is None:
         sunday_date = _service_sunday()
 
-    requests = get_return_ride_requests_for_date(sunday_date)
-    total = len(requests)
-    overflow = [req for req in requests if req.get("needs_driver")]
-    shuttle_count = total - len(overflow)
+    total = len(get_return_ride_requests_for_date(sunday_date))
+    capacity = settings.RETURN_SHUTTLE_CAPACITY
+    overflow = max(0, total - capacity)
+    label = _format_short_date(sunday_date)
 
-    lines = [
-        BRAND_PREFIX,
-        f"Returns for {_format_short_date(sunday_date)}: {total} requested "
-        f"({shuttle_count} shuttle, {len(overflow)} need drivers)",
-    ]
-
-    if overflow:
-        names = [_display_text(req.get("raw_text", "")) for req in overflow]
-        shown = names[:MAX_OVERFLOW_NAMES_SHOWN]
-        remaining = len(names) - len(shown)
-        line = f"Over: {', '.join(shown)}"
-        if remaining > 0:
-            line += f", +{remaining} more"
-        lines.append(line)
+    if total == 0:
+        body = f"Returns for {label}: nobody yet."
+    elif overflow:
+        body = (
+            f"Returns for {label}: {total} requested. "
+            f"Shuttles hold {capacity}, so {overflow} need a personal driver."
+        )
+    else:
+        body = f"Returns for {label}: {total} requested (shuttles hold {capacity})."
 
     # No opt-out notice on the counts themselves - build_requests_reply()
-    # below adds the disclosure on a number's first-ever admin reply
-    # only. Don't append OPT_OUT_NOTICE here, matching
-    # build_admin_summary()'s equivalent comment.
-    return "\n".join(lines)
+    # adds the disclosure on a number's first-ever admin reply only.
+    return f"{BRAND_PREFIX}\n{body}"
 
 
 def build_requests_full_lines(sunday_date: str | None = None) -> list[str]:
@@ -309,9 +300,10 @@ def build_requests_full_lines(sunday_date: str | None = None) -> list[str]:
     guessing which word is a surname is how the Morning Prayer roster
     started emailing the wrong people.
 
-    Riders past capacity are listed under a "Need driver" heading rather
-    than flagged one by one, because that section is read top to bottom
-    while phoning people.
+    One list, with no shuttle and driver split. Seats go to whoever
+    boards first, so signup order does not decide who ends up on a
+    shuttle and who needs a personal driver, and splitting the list on
+    that basis would put a confident label on a guess.
 
     Numbering is sequential down the printed list, so a reader partway
     through part 2 knows where they are. It is NOT the seat position,
@@ -340,24 +332,16 @@ def build_requests_full_lines(sunday_date: str | None = None) -> list[str]:
         # or with accents still sort predictably.
         return _display_text(req.get("raw_text", "")).casefold()
 
-    shuttle = sorted((r for r in requests if not r.get("needs_driver")), key=by_name)
-    overflow = sorted((r for r in requests if r.get("needs_driver")), key=by_name)
+    capacity = settings.RETURN_SHUTTLE_CAPACITY
+    overflow = max(0, len(requests) - capacity)
 
-    lines = [
-        f"Returns for {_format_short_date(sunday_date)}: {len(requests)} "
-        f"({len(shuttle)} shuttle, {len(overflow)} need drivers)"
-    ]
-
-    counter = 0
-    for req in shuttle:
-        counter += 1
-        lines.append(f"{counter}. {_display_text(req.get('raw_text', ''))}")
-
+    header = f"Returns for {_format_short_date(sunday_date)}: {len(requests)}"
     if overflow:
-        lines.append("Need driver:")
-        for req in overflow:
-            counter += 1
-            lines.append(f"{counter}. {_display_text(req.get('raw_text', ''))}")
+        header += f", {overflow} past the {capacity} shuttle seats"
+
+    lines = [header]
+    for index, req in enumerate(sorted(requests, key=by_name), start=1):
+        lines.append(f"{index}. {_display_text(req.get('raw_text', ''))}")
 
     return lines
 
