@@ -30,8 +30,17 @@ SHUTTLES_TAB = "Shuttles"
 # Fixed column positions in the sheet (A=0, B=1, ... G=6). Column G
 # ("Driver") is intentionally not read here.
 _TIMESTAMP_COL = 0
-_NAME_COL = 1
-_GRADE_COL = 2
+_GRADE_COL = 1
+_NAME_COL = 2
+
+# The live form has Grade in column B and Full Name in column C. These
+# were once the other way round in this file, so every rider showed up in
+# the admin email as their year (Freshman, Sophomore) instead of their
+# name. Name and Grade are now looked up by header text, so reordering
+# the form can't cause that again, with the fixed positions above as a
+# fallback for a header that's missing or renamed beyond recognition.
+_NAME_HEADER_PREFIX = "full name"
+_GRADE_HEADER_PREFIX = "grade"
 _STOP_COL = 3
 _PHONE_COL = 4
 _EMAIL_COL = 5
@@ -308,6 +317,8 @@ def get_riders_for_sunday(
         return []
 
     consent_index = _find_consent_index(rows[0])
+    name_index = _find_header_index(rows[0], _NAME_HEADER_PREFIX, _NAME_COL)
+    grade_index = _find_header_index(rows[0], _GRADE_HEADER_PREFIX, _GRADE_COL)
 
     riders = []
     for row in rows[1:]:  # row 0 is the header
@@ -334,12 +345,12 @@ def get_riders_for_sunday(
 
         riders.append(
             {
-                "name": _cell(row, _NAME_COL),
+                "name": _cell(row, name_index),
                 "email": _cell(row, _EMAIL_COL) or None,
                 "phone": _cell(row, _PHONE_COL),
                 "stop": stop,
                 "shuttle_id": shuttle_id,
-                "grade": _cell(row, _GRADE_COL),
+                "grade": _cell(row, grade_index),
                 "submitted_at": submitted_at.isoformat(),
                 "sms_consent": bool(
                     consent_index != -1 and _cell(row, consent_index).strip()
@@ -360,6 +371,26 @@ def get_riders_for_sunday(
 # question is edited. An unchecked optional checkbox leaves the cell
 # empty, so a non-empty cell is consent.
 SMS_CONSENT_HEADER_PREFIX = "sms consent"
+
+
+def _find_header_index(header: list[str], prefix: str, default: int) -> int:
+    """Return the column whose header starts with prefix, else default.
+
+    Matched by lowercase prefix for the same reason as the consent
+    column: Google rewords headers like "Full Name (first + last)" when a
+    form question is edited, but the leading words survive.
+    """
+    for index, cell in enumerate(header):
+        if str(cell).strip().lower().startswith(prefix):
+            return index
+
+    logger.warning(
+        "No column starting with %r found in '%s'; falling back to column %d.",
+        prefix,
+        FORM_RESPONSES_TAB,
+        default,
+    )
+    return default
 
 
 def get_signup_row(row_number: int) -> dict | None:
@@ -412,13 +443,15 @@ def get_signup_row(row_number: int) -> dict | None:
         return None
 
     consent_index = _find_consent_index(header)
+    name_index = _find_header_index(header, _NAME_HEADER_PREFIX, _NAME_COL)
+    grade_index = _find_header_index(header, _GRADE_HEADER_PREFIX, _GRADE_COL)
 
     return {
-        "name": _cell(row, _NAME_COL),
+        "name": _cell(row, name_index),
         "email": _cell(row, _EMAIL_COL) or None,
         "phone": _cell(row, _PHONE_COL),
         "stop": _cell(row, _STOP_COL),
-        "grade": _cell(row, _GRADE_COL),
+        "grade": _cell(row, grade_index),
         "submitted_at": _cell(row, _TIMESTAMP_COL),
         "sms_consent": bool(consent_index != -1 and _cell(row, consent_index).strip()),
     }
