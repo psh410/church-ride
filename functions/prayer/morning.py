@@ -68,6 +68,18 @@ _DAY_ABBREVIATIONS = {
 
 _BLANK_VALUES = {"", "—", "-", "–", "n/a", "na", "none"}
 
+# A week's Morning Prayer can be called off. The sheet says so in text
+# (a cell reading CANCELLED) and in colour (a CANCELLED swatch in the
+# legend, which sits in the same H-J block as the leader directory). Both
+# mean "nobody leads this day", never "a person named Cancelled", so they
+# must not reach the roster lookup, where they used to come back as an
+# unmatched name and trigger the alert email.
+_CANCELLED_VALUES = {"cancelled", "canceled"}
+
+
+def _is_cancelled_marker(value: str | None) -> bool:
+    return bool(value) and value.strip().lower() in _CANCELLED_VALUES
+
 _EMAIL_TEXT = """Hi everyone,
 
 Thank you for serving in Morning Prayer next week. Here's the schedule:
@@ -255,9 +267,19 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
         dev_name = _clean_name(devotional.get(key))
         worship_day = worship.get(key) or {}
         worship_name = _clean_name(worship_day.get("name"))
+        worship_cancelled = bool(worship_day.get("cancelled")) or _is_cancelled_marker(
+            worship_name
+        )
+        dev_cancelled = _is_cancelled_marker(dev_name)
+        if worship_cancelled:
+            worship_name = None
+        if dev_cancelled:
+            dev_name = None
         schedule[key] = {
             "devotional": dev_name,
             "worship": worship_name,
+            "devotional_cancelled": dev_cancelled,
+            "worship_cancelled": worship_cancelled,
             "theme": PRAYER_THEMES[key],
             "devotional_absent": _name_is_absent(dev_name, absences),
             # Colour is the authority for worship: a covered day already
@@ -538,6 +560,7 @@ def _get_worship_for_week(week_monday: date) -> dict[str, dict]:
         if entry["colour"]
     }
     absence_colour = _legend_colour(grid, "ABSENCE")
+    cancelled_colour = _legend_colour(grid, "CANCELLED")
 
     # The standing assignment, used when a cell has no usable colour.
     standing: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
@@ -562,6 +585,10 @@ def _get_worship_for_week(week_monday: date) -> dict[str, dict]:
     for offset, (key, _label) in enumerate(SCHEDULE_DAYS):
         cell_colour = _cell_colour(row, offset + 1)  # B..F are the weekdays
         default = standing.get(key)
+
+        if cancelled_colour and cell_colour == cancelled_colour:
+            result[key] = {"name": None, "absent": False, "cancelled": True}
+            continue
 
         if absence_colour and cell_colour == absence_colour:
             result[key] = {"name": default, "absent": True}
@@ -684,6 +711,9 @@ def _worship_directory(grid: list[dict]) -> list[dict]:
         name = _clean_name(_cell_value(row, 7))
         days = _cell_value(row, 9)
         if not name or not days:
+            continue
+        if _is_cancelled_marker(name):
+            # The CANCELLED legend swatch, not a leader.
             continue
         entries.append(
             {"name": name, "days": days, "colour": _cell_colour(row, 7)}
@@ -970,9 +1000,15 @@ def _schedule_table(schedule_dict: dict) -> str:
             (
                 label,
                 _render_name(
-                    day.get("devotional"), bool(day.get("devotional_absent"))
+                    day.get("devotional"),
+                    bool(day.get("devotional_absent")),
+                    bool(day.get("devotional_cancelled")),
                 ),
-                _render_name(day.get("worship"), bool(day.get("worship_absent"))),
+                _render_name(
+                    day.get("worship"),
+                    bool(day.get("worship_absent")),
+                    bool(day.get("worship_cancelled")),
+                ),
                 day.get("theme") or PRAYER_THEMES[key],
             )
         )
@@ -998,7 +1034,9 @@ def _schedule_table(schedule_dict: dict) -> str:
     )
 
 
-def _render_name(name: str | None, is_absent: bool) -> str:
+def _render_name(
+    name: str | None, is_absent: bool, is_cancelled: bool = False
+) -> str:
     """One schedule cell.
 
     An absent worship leader is named rather than hidden, with Backup in
@@ -1008,6 +1046,8 @@ def _render_name(name: str | None, is_absent: bool) -> str:
     colour on that cell is what _get_worship_for_week reads, so their
     name is simply printed as normal.
     """
+    if is_cancelled:
+        return "Cancelled"
     if not name:
         return "—" if not is_absent else "Backup"
     if is_absent:

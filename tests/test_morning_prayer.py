@@ -466,6 +466,63 @@ def test_the_alert_goes_only_to_the_coordinator():
     check("David" in captured.get("body", ""), "the alert should say which name failed")
 
 
+# --------------------------------------------------------------------------
+# A cancelled day is not a person named CANCELLED
+# --------------------------------------------------------------------------
+
+CANCELLED_PINK = "#F4CCCC"
+
+
+def _cancelled_grid(day_colours):
+    """The worship tab as it really is: the CANCELLED swatch sits in the
+    H-J block with a phone-book style row, so it looks like a leader."""
+    blank = _cell()
+    grid = _grid(day_colours)
+    grid.append(
+        _row(blank, blank, blank, blank, blank, blank, blank,
+             _cell("CANCELLED", CANCELLED_PINK), blank, _cell("Bryan Kim"))
+    )
+    return grid
+
+
+def test_a_cancelled_day_is_not_read_as_a_leader():
+    from datetime import date as _date
+
+    grid = _cancelled_grid([RYAN, CANCELLED_PINK, JAMES, KEVIN, ANDREW])
+    names = [entry["name"] for entry in mp._worship_directory(grid)]
+    check("CANCELLED" not in names, f"CANCELLED leaked into the directory: {names}")
+
+    with mock.patch.object(mp, "_worship_grid", return_value=grid):
+        got = mp._get_worship_for_week(_date(2026, 9, 14))
+    check(got["Tue"]["name"] is None, f"Tuesday should have no leader: {got['Tue']}")
+    check(got["Tue"].get("cancelled") is True, f"Tuesday should be cancelled: {got['Tue']}")
+    check(got["Mon"]["name"] == "Ryan Bielak", "other days are unaffected")
+
+
+def test_a_cancelled_day_is_shown_and_does_not_trigger_the_alert():
+    schedule = {
+        key: {"devotional": "Ryan", "worship": "Ryan", "theme": "t"}
+        for key, _ in mp.SCHEDULE_DAYS
+    }
+    schedule["Tue"] = {
+        "devotional": None, "worship": None, "theme": "t",
+        "worship_cancelled": True,
+    }
+    table = mp._schedule_table(schedule)
+    check("Cancelled" in table, f"the schedule should say Cancelled:\n{table}")
+
+    _, problems = mp.resolve_recipients_for_week(schedule, {"ryan": "r@example.com"})
+    check(not any("CANCELLED" in p.upper() for p in problems),
+          f"a cancelled day should not raise an unmatched name: {problems}")
+
+
+def test_cancelled_text_in_a_cell_is_treated_as_cancelled():
+    for value in ("CANCELLED", "Cancelled", "canceled"):
+        check(mp._is_cancelled_marker(value), f"{value!r} should count as cancelled")
+    check(not mp._is_cancelled_marker("Ryan Bielak"), "a real name is not a marker")
+    check(not mp._is_cancelled_marker(None), "None is not a marker")
+
+
 def main() -> int:
     global _RAN
     tests = [v for k, v in sorted(globals().items())
