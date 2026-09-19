@@ -76,6 +76,17 @@ _BLANK_VALUES = {"", "—", "-", "–", "n/a", "na", "none"}
 # unmatched name and trigger the alert email.
 _CANCELLED_VALUES = {"cancelled", "canceled"}
 
+# Labels in the sheet's colour-code legend (H-column swatches).
+_LEGEND_LABELS = {
+    "absence",
+    "need sub",
+    "other sub",
+    "cancelled",
+    "canceled",
+    "other color codes",
+    "other colour codes",
+}
+
 
 def _is_cancelled_marker(value: str | None) -> bool:
     return bool(value) and value.strip().lower() in _CANCELLED_VALUES
@@ -280,6 +291,7 @@ def get_morning_prayer_schedule(now: datetime | None = None) -> dict:
             "worship": worship_name,
             "devotional_cancelled": dev_cancelled,
             "worship_cancelled": worship_cancelled,
+            "worship_other_sub": bool(worship_day.get("other_sub")),
             "theme": PRAYER_THEMES[key],
             "devotional_absent": _name_is_absent(dev_name, absences),
             # Colour is the authority for worship: a covered day already
@@ -561,6 +573,8 @@ def _get_worship_for_week(week_monday: date) -> dict[str, dict]:
     }
     absence_colour = _legend_colour(grid, "ABSENCE")
     cancelled_colour = _legend_colour(grid, "CANCELLED")
+    need_sub_colour = _legend_colour(grid, "NEED SUB")
+    other_sub_colour = _legend_colour(grid, "OTHER SUB")
 
     # The standing assignment, used when a cell has no usable colour.
     standing: dict[str, str | None] = {key: None for key, _ in SCHEDULE_DAYS}
@@ -592,6 +606,18 @@ def _get_worship_for_week(week_monday: date) -> dict[str, dict]:
 
         if absence_colour and cell_colour == absence_colour:
             result[key] = {"name": default, "absent": True}
+            continue
+
+        if need_sub_colour and cell_colour == need_sub_colour:
+            # The standing leader can't make it and nobody has picked it
+            # up yet: same as an absence, name them and ask for a backup.
+            result[key] = {"name": default, "absent": True}
+            continue
+
+        if other_sub_colour and cell_colour == other_sub_colour:
+            # Somebody outside the directory is covering. The sheet says
+            # so by colour only, so there is no name to email.
+            result[key] = {"name": None, "absent": False, "other_sub": True}
             continue
 
         name = colour_to_name.get(cell_colour) if cell_colour else None
@@ -681,8 +707,8 @@ def _cell_value(row: dict | None, index: int) -> str:
 def _cell_colour(row: dict | None, index: int) -> str | None:
     """Background colour of one cell as an uppercase hex string.
 
-    Google omits channels that are at full value, so an unset background
-    arrives as {} and has to be read as white rather than as black.
+    Google omits any channel that is 0, so a missing channel is 0 and
+    red arrives as {"red": 1}.
     """
     cells = (row or {}).get("values") or []
     if index >= len(cells):
@@ -691,10 +717,15 @@ def _cell_colour(row: dict | None, index: int) -> str | None:
     background = fmt.get("backgroundColor")
     if background is None:
         return None
+    # The API leaves out any channel that is 0 (the protobuf default), so
+    # pure red arrives as {"red": 1} and black as {}. Defaulting a missing
+    # channel to 1.0 read red as white and black as white, which is how
+    # the NEED SUB and CANCELLED swatches became indistinguishable from an
+    # uncoloured cell. White is always sent explicitly, as all three 1s.
     channels = (
-        background.get("red", 1.0),
-        background.get("green", 1.0),
-        background.get("blue", 1.0),
+        background.get("red", 0.0),
+        background.get("green", 0.0),
+        background.get("blue", 0.0),
     )
     return "#" + "".join(f"{int(round(c * 255)):02X}" for c in channels)
 
@@ -712,8 +743,17 @@ def _worship_directory(grid: list[dict]) -> list[dict]:
         days = _cell_value(row, 9)
         if not name or not days:
             continue
-        if _is_cancelled_marker(name):
-            # The CANCELLED legend swatch, not a leader.
+        if name.lower() in _LEGEND_LABELS:
+            # A colour-code swatch, not a leader.
+            continue
+        if not _parse_worship_days(days) and days.strip().lower() not in (
+            _NON_DAY_DIRECTORY_VALUES
+        ):
+            # Column J beside the legend holds the Worship Leader Hall of
+            # Fame (names and phone numbers), not weekdays. Without this
+            # check ABSENCE, NEED SUB, OTHER SUB and CANCELLED all became
+            # "leaders", and one colour then resolved to whichever of
+            # them came last in the sheet.
             continue
         entries.append(
             {"name": name, "days": days, "colour": _cell_colour(row, 7)}
@@ -1008,6 +1048,7 @@ def _schedule_table(schedule_dict: dict) -> str:
                     day.get("worship"),
                     bool(day.get("worship_absent")),
                     bool(day.get("worship_cancelled")),
+                    bool(day.get("worship_other_sub")),
                 ),
                 day.get("theme") or PRAYER_THEMES[key],
             )
@@ -1035,7 +1076,10 @@ def _schedule_table(schedule_dict: dict) -> str:
 
 
 def _render_name(
-    name: str | None, is_absent: bool, is_cancelled: bool = False
+    name: str | None,
+    is_absent: bool,
+    is_cancelled: bool = False,
+    is_other_sub: bool = False,
 ) -> str:
     """One schedule cell.
 
@@ -1048,6 +1092,8 @@ def _render_name(
     """
     if is_cancelled:
         return "Cancelled"
+    if is_other_sub:
+        return "Other sub"
     if not name:
         return "—" if not is_absent else "Backup"
     if is_absent:

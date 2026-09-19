@@ -133,12 +133,15 @@ GREY = "#B7B7B7"
 
 
 def _hex_to_channels(value):
+    """Colour as the Sheets API sends it: channels equal to 0 are omitted,
+    so pure red is {"red": 1} and black is {}."""
     value = value.lstrip("#")
-    return {
+    channels = {
         "red": int(value[0:2], 16) / 255,
         "green": int(value[2:4], 16) / 255,
         "blue": int(value[4:6], 16) / 255,
     }
+    return {name: level for name, level in channels.items() if level}
 
 
 def _cell(value="", colour=None):
@@ -182,6 +185,29 @@ def _grid(day_colours, week_date="9/13/2026"):
         _row(blank, blank, blank, blank, blank, blank, blank, _cell("ABSENCE", GREY))
     )
     return rows
+
+
+NEED_SUB_RED = "#FF0000"
+OTHER_SUB_YELLOW = "#FFFF00"
+CANCELLED_BLACK = "#000000"
+
+
+def _real_layout_grid(day_colours):
+    """The live tab: every legend swatch has a Hall of Fame name in column
+    J beside it, which is what once made them look like leaders."""
+    blank = _cell()
+    grid = _grid(day_colours)
+    for label, colour, hall_of_fame in (
+        ("ABSENCE", GREY, "Aaron Chun"),
+        ("NEED SUB", NEED_SUB_RED, "Alex Joe"),
+        ("OTHER SUB", OTHER_SUB_YELLOW, "Bo Wang"),
+        ("CANCELLED", CANCELLED_BLACK, "Bryan Kim"),
+    ):
+        grid.append(
+            _row(blank, blank, blank, blank, blank, blank, blank,
+                 _cell(label, colour), blank, _cell(hall_of_fame))
+        )
+    return grid
 
 
 def _worship_for(day_colours, week_date="9/13/2026"):
@@ -521,6 +547,46 @@ def test_cancelled_text_in_a_cell_is_treated_as_cancelled():
         check(mp._is_cancelled_marker(value), f"{value!r} should count as cancelled")
     check(not mp._is_cancelled_marker("Ryan Bielak"), "a real name is not a marker")
     check(not mp._is_cancelled_marker(None), "None is not a marker")
+
+
+def test_a_need_sub_day_is_not_cancelled():
+    """Regression: Tuesday was tinted NEED SUB red, arrived as {"red": 1},
+    read as white, and white resolved to the last legend row, CANCELLED."""
+    from datetime import date as _date
+
+    grid = _real_layout_grid([RYAN, NEED_SUB_RED, JAMES, KEVIN, ANDREW])
+    names = [entry["name"] for entry in mp._worship_directory(grid)]
+    check(len(names) == 5, f"only the five leaders belong in the directory: {names}")
+    with mock.patch.object(mp, "_worship_grid", return_value=grid):
+        got = mp._get_worship_for_week(_date(2026, 9, 14))
+    check(got["Tue"]["name"] == "Kevin Kim", f"Tuesday names the standing leader: {got['Tue']}")
+    check(got["Tue"]["absent"] is True, f"NEED SUB should ask for a backup: {got['Tue']}")
+    check(not got["Tue"].get("cancelled"), "NEED SUB is not a cancellation")
+
+
+def test_every_legend_colour_is_read_as_itself():
+    from datetime import date as _date
+
+    for colour, expect in (
+        (GREY, {"absent": True}),
+        (NEED_SUB_RED, {"absent": True}),
+        (OTHER_SUB_YELLOW, {"other_sub": True}),
+        (CANCELLED_BLACK, {"cancelled": True}),
+    ):
+        grid = _real_layout_grid([RYAN, colour, JAMES, KEVIN, ANDREW])
+        with mock.patch.object(mp, "_worship_grid", return_value=grid):
+            got = mp._get_worship_for_week(_date(2026, 9, 14))["Tue"]
+        for key, value in expect.items():
+            check(got.get(key) is value, f"{colour} should set {key}: {got}")
+        check(got["name"] not in {"ABSENCE", "NEED SUB", "OTHER SUB", "CANCELLED"},
+              f"{colour} became a leader named {got['name']}")
+
+
+def test_colour_channels_the_api_omits_read_as_zero():
+    row = _row(_cell("x", NEED_SUB_RED), _cell("y", CANCELLED_BLACK), _cell("z", "#FFFFFF"))
+    check(mp._cell_colour(row, 0) == "#FF0000", "red should stay red")
+    check(mp._cell_colour(row, 1) == "#000000", "black should stay black")
+    check(mp._cell_colour(row, 2) == "#FFFFFF", "white should stay white")
 
 
 def main() -> int:
