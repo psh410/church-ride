@@ -717,7 +717,9 @@ def _build_saturday_driver_assignment_body(
         lines.append(_SECTION_DIVIDER)
         lines.append("")
 
-    personal_driver_riders = all_riders.get("non_shuttle_riders") or []
+    personal_driver_riders = _sort_personal_driver_riders(
+        all_riders.get("non_shuttle_riders") or []
+    )
     if personal_driver_riders:
         lines.append("PERSONAL DRIVER RIDES (not on a shuttle):")
         for rider in personal_driver_riders:
@@ -1050,7 +1052,7 @@ def _build_saturday_summary(
     if non_shuttle_riders:
         lines.append("")
         lines.append("NON-SHUTTLE RIDERS (need personal driver coordination):")
-        for rider in non_shuttle_riders:
+        for rider in _sort_personal_driver_riders(non_shuttle_riders):
             lines.append(f"  \u2022 {_format_personal_driver_rider(rider)}")
 
     lines.append("")
@@ -1064,6 +1066,23 @@ def _build_saturday_summary(
     )
 
     return "\n".join(lines)
+
+
+def _sort_personal_driver_riders(riders: list[dict]) -> list[dict]:
+    """Order personal-driver riders by driver, then by student name.
+
+    Each driver's riders end up together so an admin can see one driver's
+    load at a glance. Riders with nobody assigned come last, so the ones
+    that still need a driver are in one block at the bottom.
+    """
+    return sorted(
+        riders,
+        key=lambda r: (
+            not r.get("personal_driver"),
+            (r.get("personal_driver") or "").lower(),
+            str(r.get("name", "")).lower(),
+        ),
+    )
 
 
 def _format_personal_driver_rider(rider: dict) -> str:

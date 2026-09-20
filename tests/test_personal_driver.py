@@ -174,9 +174,20 @@ for label, module, fn, args in (
             pass
     check(f"{label} clears the route cache first", clear.call_count >= 1)
 
+
+# ---- Sorted by driver, then student ----
+order = [r["name"] for r in we._sort_personal_driver_riders(non_shuttle)]
+check("sorted by driver then student, Unassigned last",
+      order == ["Sarah Lee", "Tom Suh", "Grace Ryoo", "Justin Kim"], str(order))
+check("driver email uses the sorted order",
+      body.index("Sarah Lee - ") < body.index("Tom Suh - ") < body.index("Grace Ryoo - ") < body.index("Justin Kim - "))
+check("admin email uses the sorted order",
+      admin.index("Sarah Lee - ") < admin.index("Tom Suh - ") < admin.index("Grace Ryoo - ") < admin.index("Justin Kim - "))
+
 print()
 failed = [label for label, ok in results if not ok]
 if failed:
     print(f"{len(failed)} FAILED: {failed}")
     sys.exit(1)
 print(f"All {len(results)} checks passed.")
+
