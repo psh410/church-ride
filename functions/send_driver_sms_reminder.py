@@ -106,6 +106,10 @@ def send_driver_sms_reminders() -> dict:
             run, or {"status": "failed", "reason": str} if the Sunday
             has no schedule entry or a hard error occurs.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    from functions.read_riders_sheet import clear_route_caches
+
+    clear_route_caches()
     try:
         sunday_date = get_next_sunday_date()
         schedule = get_semester_schedule()

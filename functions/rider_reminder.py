@@ -247,6 +247,10 @@ def send_saturday_rider_reminders(
         dict: {"status", "sunday_date", "sent", "skipped", "failed",
             "details"} for the run log.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    from functions.read_riders_sheet import clear_route_caches
+
+    clear_route_caches()
     if sunday_date is None:
         sunday_date = get_next_sunday_date()
 

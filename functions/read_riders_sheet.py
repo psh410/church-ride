@@ -40,6 +40,7 @@ _NAME_COL = 2
 # name. Name and Grade are now looked up by header text, so reordering
 # the form can't cause that again, with the fixed positions above as a
 # fallback for a header that's missing or renamed beyond recognition.
+_DRIVER_HEADER = "driver"
 _NAME_HEADER_PREFIX = "full name"
 _GRADE_HEADER_PREFIX = "grade"
 _STOP_COL = 3
@@ -364,6 +365,7 @@ def get_riders_for_sunday(
     consent_index = _find_consent_index(rows[0])
     name_index = _find_header_index(rows[0], _NAME_HEADER_PREFIX, _NAME_COL)
     grade_index = _find_header_index(rows[0], _GRADE_HEADER_PREFIX, _GRADE_COL)
+    driver_index = _find_driver_index(rows[0])
 
     riders = []
     for row in rows[1:]:  # row 0 is the header
@@ -394,6 +396,12 @@ def get_riders_for_sunday(
                 "email": _cell(row, _EMAIL_COL) or None,
                 "phone": _cell(row, _PHONE_COL),
                 "stop": stop,
+                # The stop as the rider would recognise it, with the
+                # script's "/driver" style flags removed, and whether
+                # the shuttle was full when they signed up.
+                "stop_display": strip_signup_flags(stop),
+                "shuttle_full": "driver" in signup_flags(stop),
+                "personal_driver": _clean_personal_driver(_cell(row, driver_index)),
                 "shuttle_id": shuttle_id,
                 "grade": _cell(row, grade_index),
                 "submitted_at": submitted_at.isoformat(),
@@ -436,6 +444,35 @@ def _find_header_index(header: list[str], prefix: str, default: int) -> int:
         default,
     )
     return default
+
+
+def _find_driver_index(header: list[str]) -> int:
+    """Column titled exactly "Driver", or -1 if there isn't one.
+
+    Found by title, not position: the column has moved (it was column I,
+    it is now further right) and will again. An exact match, because
+    "Driver (4)" style labels also exist elsewhere in these workbooks.
+    """
+    for index, cell in enumerate(header):
+        if str(cell).strip().lower() == _DRIVER_HEADER:
+            return index
+    return -1
+
+
+def _clean_personal_driver(raw: str) -> str:
+    """The person driving this rider, or "" when nobody is assigned.
+
+    The Driver column has also held shuttle assignments ("shuttle 2",
+    "Van"), which mean the rider is on a shuttle, not that a person is
+    driving them, so those read as unassigned.
+    """
+    value = " ".join(str(raw).split())
+    lowered = value.lower()
+    if not value or lowered in ("van", "n/a", "na", "none", "-"):
+        return ""
+    if lowered.startswith("shuttle"):
+        return ""
+    return value
 
 
 def get_signup_row(row_number: int) -> dict | None:
@@ -807,6 +844,19 @@ def signup_flags(stop: str) -> set[str]:
     """Lowercased known flags on a campus address cell."""
     typed = {part.strip().lower() for part in str(stop).split("/")[1:]}
     return typed & set(SIGNUP_FLAGS)
+
+
+def strip_signup_flags(stop: str) -> str:
+    """A campus address cell without its "/duplicate", "/driver" flags.
+
+    Only known flags are removed, so an address a rider typed with a
+    slash in it ("1002 S Lincoln Apt 1/2") is left alone.
+    """
+    parts = str(stop).split("/")
+    kept = [parts[0]] + [
+        part for part in parts[1:] if part.strip().lower() not in SIGNUP_FLAGS
+    ]
+    return "/".join(kept).strip()
 
 
 def find_signup_rows_for_phone(

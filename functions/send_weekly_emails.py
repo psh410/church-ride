@@ -13,12 +13,14 @@ from config import settings
 from db.firestore_client import get_semester_schedule
 from functions.read_riders_sheet import (
     MAX_RIDERS_PER_SHUTTLE,
+    clear_route_caches,
     get_all_riders_for_sunday,
     get_next_sunday_date,
     get_rider_counts,
     get_shuttle_capacities,
     get_stop_times_map,
     get_stop_to_shuttle_map,
+    strip_signup_flags,
 )
 from functions.generate_map import build_map_legend, build_static_map_url
 from functions.read_sheets import get_all_drivers_with_history, get_routes
@@ -94,6 +96,8 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
         driver's email (looked up by name) if one is assigned and has
         an email on file.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    clear_route_caches()
     try:
         schedule = get_semester_schedule()
     except Exception as exc:
@@ -195,6 +199,8 @@ def send_saturday_update(sunday_date: str) -> dict:
     Raises:
         RuntimeError: If the rider list can't be read.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    clear_route_caches()
     try:
         all_riders = get_all_riders_for_sunday(sunday_date)
     except Exception as exc:
@@ -291,6 +297,8 @@ def send_saturday_driver_assignment(sunday_date: str) -> dict:
         driver's email (looked up by name) if one is assigned and has
         an email on file.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    clear_route_caches()
     try:
         all_riders = get_all_riders_for_sunday(sunday_date)
     except Exception as exc:
@@ -401,6 +409,8 @@ def send_shuttle_full_alert(shuttle_id: str, sunday_date: str) -> dict:
     Raises:
         RuntimeError: If rider counts can't be read.
     """
+    # Every send reads the latest Routes tab, never a saved copy.
+    clear_route_caches()
     try:
         counts = get_rider_counts(sunday_date)
     except Exception as exc:
@@ -705,6 +715,13 @@ def _build_saturday_driver_assignment_body(
         # announced at church, not set in the Routes tab.
         lines.append("\U0001f504 Return time: announced at church")
         lines.append(_SECTION_DIVIDER)
+        lines.append("")
+
+    personal_driver_riders = all_riders.get("non_shuttle_riders") or []
+    if personal_driver_riders:
+        lines.append("PERSONAL DRIVER RIDES (not on a shuttle):")
+        for rider in personal_driver_riders:
+            lines.append(f"  \u2022 {_format_personal_driver_rider(rider)}")
         lines.append("")
 
     lines.append(f"Questions about driving? Contact {OVERSEER_DRIVER_CONTACT_NAME} at {settings.OVERSEER_DRIVER_EMAIL}")
@@ -1034,7 +1051,7 @@ def _build_saturday_summary(
         lines.append("")
         lines.append("NON-SHUTTLE RIDERS (need personal driver coordination):")
         for rider in non_shuttle_riders:
-            lines.append(f"  \u2022 {rider['name']} - {rider['stop']}")
+            lines.append(f"  \u2022 {_format_personal_driver_rider(rider)}")
 
     lines.append("")
     lines.append(f"To view all signups: {RIDER_SIGNUP_SHEET_URL}")
@@ -1047,6 +1064,20 @@ def _build_saturday_summary(
     )
 
     return "\n".join(lines)
+
+
+def _format_personal_driver_rider(rider: dict) -> str:
+    """One line for a rider who needs a personal driver.
+
+    "Name - Stop - Driver", with "(shuttle full)" after a stop whose
+    shuttle had no seats left, and "Unassigned" when nobody is driving
+    them yet.
+    """
+    stop = rider.get("stop_display") or strip_signup_flags(rider.get("stop", ""))
+    if rider.get("shuttle_full"):
+        stop = f"{stop} (shuttle full)"
+    driver = rider.get("personal_driver") or "Unassigned"
+    return f"{rider['name']} - {stop} - {driver}"
 
 
 def _rider_count_text(count: int) -> str:
