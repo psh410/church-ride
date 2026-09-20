@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import logging
+import time as _time
 from datetime import date, datetime, time, timedelta
 
 from config.clock import church_today
@@ -61,10 +62,50 @@ _TIMESTAMP_FORMATS = (
 # only reads the "Routes" tab once per process, no matter how many times
 # get_stop_to_shuttle_map()/get_stop_times_map()/get_shuttle_capacities()
 # are called.
+#
+# The cache used to live for the whole process. Cloud Run keeps a warm
+# container for hours, so a route edited in the sheet (a stop moved to
+# the other van, a pickup time changed) never reached any email or text
+# until the container happened to restart. Riders were then grouped by the
+# OLD stop-to-shuttle map, so a moved stop showed up under the wrong
+# shuttle with "No riders". The cache now expires after a minute: long
+# enough that one webhook or one email run reads each tab once, short
+# enough that an edit is picked up by the next send.
+ROUTE_CACHE_TTL_SECONDS = 60
+
+_cache_loaded_at: float | None = None
 _routes_cache: list[dict] | None = None
 _stop_to_shuttle_cache: dict[str, str] | None = None
 _stop_times_cache: dict[str, str] | None = None
 _shuttle_capacities_cache: dict[str, int] | None = None
+
+
+def clear_route_caches() -> None:
+    """Forget every cached Routes/Shuttles read so the next call re-reads."""
+    global _routes_cache, _stop_to_shuttle_cache, _stop_times_cache
+    global _shuttle_capacities_cache, _cache_loaded_at
+    _routes_cache = None
+    _stop_to_shuttle_cache = None
+    _stop_times_cache = None
+    _shuttle_capacities_cache = None
+    _cache_loaded_at = None
+
+
+def _expire_stale_caches() -> None:
+    """Drop all four caches together once they are older than the TTL.
+
+    They are dropped as a group because the stop maps are derived from
+    the routes: expiring one and not the other would let a fresh route
+    list sit beside an old stop-to-shuttle map, the exact mismatch this
+    exists to prevent.
+    """
+    global _cache_loaded_at
+    now = _time.monotonic()
+    if _cache_loaded_at is None:
+        _cache_loaded_at = now
+    elif now - _cache_loaded_at > ROUTE_CACHE_TTL_SECONDS:
+        clear_route_caches()
+        _cache_loaded_at = now
 
 
 def _get_cached_routes() -> list[dict]:
@@ -79,6 +120,7 @@ def _get_cached_routes() -> list[dict]:
     """
     global _routes_cache
 
+    _expire_stale_caches()
     if _routes_cache is None:
         try:
             _routes_cache = get_routes()
@@ -106,6 +148,7 @@ def get_stop_to_shuttle_map() -> dict:
     """
     global _stop_to_shuttle_cache
 
+    _expire_stale_caches()
     if _stop_to_shuttle_cache is None:
         stop_to_shuttle: dict[str, str] = {}
         for route in _get_cached_routes():
@@ -136,6 +179,7 @@ def get_stop_times_map() -> dict:
     """
     global _stop_times_cache
 
+    _expire_stale_caches()
     if _stop_times_cache is None:
         stop_times: dict[str, str] = {}
         for route in _get_cached_routes():
@@ -182,6 +226,7 @@ def get_shuttle_capacities() -> dict:
     """
     global _shuttle_capacities_cache
 
+    _expire_stale_caches()
     if _shuttle_capacities_cache is not None:
         return _shuttle_capacities_cache
 
