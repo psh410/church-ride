@@ -178,7 +178,7 @@ for label, module, fn, args in (
 # ---- Sorted by driver, then student ----
 order = [r["name"] for r in we._sort_personal_driver_riders(non_shuttle)]
 check("sorted by driver then student, Unassigned last",
-      order == ["Sarah Lee", "Tom Suh", "Grace Ryoo", "Justin Kim"], str(order))
+      order == ["Sarah Lee", "Tom Suh", "Amy Cho", "Grace Ryoo", "Justin Kim", "Sam Park"], str(order))
 check("driver email uses the sorted order",
       body.index("Sarah Lee - ") < body.index("Tom Suh - ") < body.index("Grace Ryoo - ") < body.index("Justin Kim - "))
 check("admin email uses the sorted order",
