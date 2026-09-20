@@ -28,24 +28,129 @@ FORM_RESPONSES_TAB = "Form Responses 1"
 # get_shuttle_capacities() for the exact layout.
 SHUTTLES_TAB = "Shuttles"
 
-# Fixed column positions in the sheet (A=0, B=1, ... G=6). Column G
-# ("Driver") is intentionally not read here.
-_TIMESTAMP_COL = 0
-_GRADE_COL = 1
-_NAME_COL = 2
+# Columns are found by the TITLE in row 1, never by position. The form has
+# been edited and reordered before (Grade and Full Name have swapped, a
+# Driver column has moved), and reading by position then labels every
+# rider with the wrong field without any error: the admin email once
+# listed each rider's year instead of their name.
+#
+#   key        header must start with   exact   needed
+_COLUMN_SPECS = {
+    "timestamp": ("timestamp", False, True),
+    "name": ("full name", False, True),
+    "grade": ("grade", False, False),
+    "stop": ("campus address", False, True),
+    "phone": ("phone", False, True),
+    "email": ("email", False, False),
+    # Exact, because "Driver (4)" style labels exist elsewhere in these
+    # workbooks. Optional: nobody is assigned until someone fills it in.
+    "driver": ("driver", True, False),
+}
 
-# The live form has Grade in column B and Full Name in column C. These
-# were once the other way round in this file, so every rider showed up in
-# the admin email as their year (Freshman, Sophomore) instead of their
-# name. Name and Grade are now looked up by header text, so reordering
-# the form can't cause that again, with the fixed positions above as a
-# fallback for a header that's missing or renamed beyond recognition.
-_DRIVER_HEADER = "driver"
-_NAME_HEADER_PREFIX = "full name"
-_GRADE_HEADER_PREFIX = "grade"
-_STOP_COL = 3
-_PHONE_COL = 4
-_EMAIL_COL = 5
+# What a rider's year looks like. Used to notice a Full Name column that
+# actually holds years.
+_GRADE_WORDS = {
+    "freshman", "freshmen", "sophomore", "junior", "senior",
+    "graduate", "grad", "career",
+}
+
+
+class SheetLayoutError(RuntimeError):
+    """The rider sheet's columns are not what the code needs.
+
+    Raised instead of guessing. Sending a driver a list of years where the
+    names should be is worse than a send that fails loudly and gets fixed.
+    """
+
+
+def _header_matches(cell: str, needle: str, exact: bool) -> bool:
+    text = " ".join(str(cell).split()).lower()
+    return text == needle if exact else text.startswith(needle)
+
+
+def resolve_columns(header: list[str]) -> dict[str, int]:
+    """Map each field to its column index by reading the header row.
+
+    Returns:
+        dict: {"timestamp", "name", "grade", "stop", "phone", "email",
+            "driver"} to a 0-based index, or -1 for an optional column
+            that isn't there.
+
+    Raises:
+        SheetLayoutError: If a required column is missing, or two fields
+            resolved to the same column.
+    """
+    columns: dict[str, int] = {}
+    missing: list[str] = []
+    for key, (needle, exact, required) in _COLUMN_SPECS.items():
+        hits = [i for i, cell in enumerate(header) if _header_matches(cell, needle, exact)]
+        if not hits:
+            columns[key] = -1
+            if required:
+                missing.append(f"'{needle}'")
+            continue
+        if len(hits) > 1:
+            logger.warning(
+                "%d columns in '%s' match %r; using the first (column %s).",
+                len(hits), FORM_RESPONSES_TAB, needle, column_letter(hits[0]),
+            )
+        columns[key] = hits[0]
+
+    if missing:
+        raise SheetLayoutError(
+            f"'{FORM_RESPONSES_TAB}' has no column titled {', '.join(missing)}. "
+            f"Row 1 reads: {[str(c)[:30] for c in header]}. Restore the "
+            f"header or update _COLUMN_SPECS; nothing was sent."
+        )
+
+    used: dict[int, str] = {}
+    for key, index in columns.items():
+        if index == -1:
+            continue
+        if index in used:
+            raise SheetLayoutError(
+                f"'{key}' and '{used[index]}' both resolve to column "
+                f"{column_letter(index)} ('{header[index]}')."
+            )
+        used[index] = key
+    return columns
+
+
+def column_letter(index: int) -> str:
+    """0-based column index to a sheet letter (0 -> A, 26 -> AA)."""
+    letters = ""
+    index += 1
+    while index:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(65 + remainder) + letters
+    return letters
+
+
+def check_name_column(rows: list[list], columns: dict[str, int]) -> None:
+    """Refuse to go on if the Full Name column is full of years.
+
+    Header titles can be right while the data underneath is not, so this
+    looks at recent rows too. It is the exact failure that put
+    "Freshman" where a rider's name belonged.
+
+    Raises:
+        SheetLayoutError: If most recent names are Freshman/Sophomore etc.
+    """
+    samples = [
+        _cell(row, columns["name"]).lower()
+        for row in rows[-100:]
+        if _cell(row, columns["name"])
+    ]
+    if len(samples) >= 3:
+        grades = sum(1 for value in samples if value in _GRADE_WORDS)
+        if grades / len(samples) >= 0.6:
+            raise SheetLayoutError(
+                f"The '{'Full Name'}' column (column "
+                f"{column_letter(columns['name'])}) holds years, not names: "
+                f"{grades} of the last {len(samples)} values are "
+                f"Freshman, Sophomore, etc. Check the column order."
+            )
+
 
 # Each shuttle can seat 14 riders plus the driver (15 total).
 MAX_RIDERS_PER_SHUTTLE = 14
@@ -363,13 +468,12 @@ def get_riders_for_sunday(
         return []
 
     consent_index = _find_consent_index(rows[0])
-    name_index = _find_header_index(rows[0], _NAME_HEADER_PREFIX, _NAME_COL)
-    grade_index = _find_header_index(rows[0], _GRADE_HEADER_PREFIX, _GRADE_COL)
-    driver_index = _find_driver_index(rows[0])
+    cols = resolve_columns(rows[0])
+    check_name_column(rows[1:], cols)
 
     riders = []
     for row in rows[1:]:  # row 0 is the header
-        timestamp_raw = _cell(row, _TIMESTAMP_COL)
+        timestamp_raw = _cell(row, cols["timestamp"])
         if not timestamp_raw:
             continue
 
@@ -384,7 +488,7 @@ def get_riders_for_sunday(
         if not (window_start <= submitted_at <= window_end):
             continue
 
-        stop = _cell(row, _STOP_COL)
+        stop = _cell(row, cols["stop"])
         shuttle_id = get_stop_to_shuttle_map().get(stop)
         if shuttle_id is None and not include_non_shuttle:
             # Not a serviced stop (e.g. "Other") - ignore this signup.
@@ -392,18 +496,18 @@ def get_riders_for_sunday(
 
         riders.append(
             {
-                "name": _cell(row, name_index),
-                "email": _cell(row, _EMAIL_COL) or None,
-                "phone": _cell(row, _PHONE_COL),
+                "name": _cell(row, cols["name"]),
+                "email": _cell(row, cols["email"]) or None,
+                "phone": _cell(row, cols["phone"]),
                 "stop": stop,
                 # The stop as the rider would recognise it, with the
                 # script's "/driver" style flags removed, and whether
                 # the shuttle was full when they signed up.
                 "stop_display": strip_signup_flags(stop),
                 "shuttle_full": "driver" in signup_flags(stop),
-                "personal_driver": _clean_personal_driver(_cell(row, driver_index)),
+                "personal_driver": _clean_personal_driver(_cell(row, cols["driver"])),
                 "shuttle_id": shuttle_id,
-                "grade": _cell(row, grade_index),
+                "grade": _cell(row, cols["grade"]),
                 "submitted_at": submitted_at.isoformat(),
                 "sms_consent": bool(
                     consent_index != -1 and _cell(row, consent_index).strip()
@@ -424,39 +528,6 @@ def get_riders_for_sunday(
 # question is edited. An unchecked optional checkbox leaves the cell
 # empty, so a non-empty cell is consent.
 SMS_CONSENT_HEADER_PREFIX = "sms consent"
-
-
-def _find_header_index(header: list[str], prefix: str, default: int) -> int:
-    """Return the column whose header starts with prefix, else default.
-
-    Matched by lowercase prefix for the same reason as the consent
-    column: Google rewords headers like "Full Name (first + last)" when a
-    form question is edited, but the leading words survive.
-    """
-    for index, cell in enumerate(header):
-        if str(cell).strip().lower().startswith(prefix):
-            return index
-
-    logger.warning(
-        "No column starting with %r found in '%s'; falling back to column %d.",
-        prefix,
-        FORM_RESPONSES_TAB,
-        default,
-    )
-    return default
-
-
-def _find_driver_index(header: list[str]) -> int:
-    """Column titled exactly "Driver", or -1 if there isn't one.
-
-    Found by title, not position: the column has moved (it was column I,
-    it is now further right) and will again. An exact match, because
-    "Driver (4)" style labels also exist elsewhere in these workbooks.
-    """
-    for index, cell in enumerate(header):
-        if str(cell).strip().lower() == _DRIVER_HEADER:
-            return index
-    return -1
 
 
 def _clean_personal_driver(raw: str) -> str:
@@ -520,21 +591,21 @@ def get_signup_row(row_number: int) -> dict | None:
     header = rows[0]
     row = rows[row_number - 1]
 
-    if not _cell(row, _TIMESTAMP_COL):
+    cols = resolve_columns(header)
+
+    if not _cell(row, cols["timestamp"]):
         logger.warning("Signup row %s has no timestamp; ignoring.", row_number)
         return None
 
     consent_index = _find_consent_index(header)
-    name_index = _find_header_index(header, _NAME_HEADER_PREFIX, _NAME_COL)
-    grade_index = _find_header_index(header, _GRADE_HEADER_PREFIX, _GRADE_COL)
 
     return {
-        "name": _cell(row, name_index),
-        "email": _cell(row, _EMAIL_COL) or None,
-        "phone": _cell(row, _PHONE_COL),
-        "stop": _cell(row, _STOP_COL),
-        "grade": _cell(row, grade_index),
-        "submitted_at": _cell(row, _TIMESTAMP_COL),
+        "name": _cell(row, cols["name"]),
+        "email": _cell(row, cols["email"]) or None,
+        "phone": _cell(row, cols["phone"]),
+        "stop": _cell(row, cols["stop"]),
+        "grade": _cell(row, cols["grade"]),
+        "submitted_at": _cell(row, cols["timestamp"]),
         "sms_consent": bool(consent_index != -1 and _cell(row, consent_index).strip()),
     }
 
@@ -908,19 +979,23 @@ def find_signup_rows_for_phone(
             f"Failed to read '{FORM_RESPONSES_TAB}' tab: {exc}"
         ) from exc
 
+    if not rows:
+        return []
+    cols = resolve_columns(rows[0])
+
     found: list[int] = []
     for index, row in enumerate(rows[1:], start=2):  # row 1 is the header
-        submitted_at = _parse_timestamp(_cell(row, _TIMESTAMP_COL))
+        submitted_at = _parse_timestamp(_cell(row, cols["timestamp"]))
         if submitted_at is None:
             continue
         if not (window_start <= submitted_at <= window_end):
             continue
-        if not include_dead and signup_flags(_cell(row, _STOP_COL)) & set(
+        if not include_dead and signup_flags(_cell(row, cols["stop"])) & set(
             DEAD_ROW_FLAGS
         ):
             continue
         try:
-            if normalize_to_e164(_cell(row, _PHONE_COL)) == target:
+            if normalize_to_e164(_cell(row, cols["phone"])) == target:
                 found.append(index)
         except ValueError:
             continue
@@ -952,6 +1027,62 @@ def find_signup_row_for_phone(phone: str, sunday_date: str) -> int | None:
     """
     rows = find_signup_rows_for_phone(phone, sunday_date)
     return rows[-1] if rows else None
+
+
+def check_sheet_headers() -> dict:
+    """Read the rider sheet and report whether its layout is usable.
+
+    Meant for a person to run before a send (GET /check-sheet-headers),
+    since the scheduled jobs would otherwise be the first to find out.
+
+    Returns:
+        dict: {"ok": bool, "problems": [str], "columns": {field: "D"},
+            "header": [str]}.
+    """
+    problems: list[str] = []
+    try:
+        service = get_sheet_client()
+        rows = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=FORM_RESPONSES_TAB)
+            .execute()
+        ).get("values", [])
+    except Exception as exc:
+        return {"ok": False, "problems": [f"Could not read the sheet: {exc}"],
+                "columns": {}, "header": []}
+
+    if not rows:
+        return {"ok": False, "problems": ["The sheet is empty."], "columns": {}, "header": []}
+
+    header = rows[0]
+    columns: dict[str, int] = {}
+    try:
+        columns = resolve_columns(header)
+        check_name_column(rows[1:], columns)
+    except SheetLayoutError as exc:
+        problems.append(str(exc))
+
+    for key, (needle, exact, required) in _COLUMN_SPECS.items():
+        hits = [i for i, c in enumerate(header) if _header_matches(c, needle, exact)]
+        if len(hits) > 1:
+            problems.append(
+                f"{len(hits)} columns are titled like '{needle}' "
+                f"({', '.join(column_letter(i) for i in hits)}); the first is used."
+            )
+        if not hits and not required:
+            problems.append(f"No '{needle}' column (optional).")
+
+    if _find_consent_index(header) == -1:
+        problems.append("No 'SMS Consent' column: nobody will be texted.")
+
+    hard = [p for p in problems if "(optional)" not in p and "are titled like" not in p]
+    return {
+        "ok": not hard,
+        "problems": problems,
+        "columns": {k: column_letter(v) for k, v in columns.items() if v != -1},
+        "header": [str(c)[:40] for c in header],
+    }
 
 
 def _find_consent_index(header: list[str]) -> int:

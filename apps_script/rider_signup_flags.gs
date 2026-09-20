@@ -4,10 +4,53 @@
 // gives us e.response (a FormResponse), not e.range like a
 // spreadsheet-attached trigger would.
 
-const CAMPUS_ADDRESS_COL = 4;  // Column D
-const EMAIL_COL = 6;           // Column F
-const PHONE_COL = 5;           // Column E
-const TIMESTAMP_COL = 1;       // Column A
+// Column positions (1-indexed). These are NOT fixed: loadColumns() fills
+// them in from the header row on every run, so reordering the form
+// sheet's columns cannot make the script flag the wrong cell.
+let CAMPUS_ADDRESS_COL = 0;
+let EMAIL_COL = 0;
+let PHONE_COL = 0;
+let TIMESTAMP_COL = 0;
+
+// Header text each column must start with (case-insensitive).
+const REQUIRED_HEADERS = {
+  TIMESTAMP_COL: "timestamp",
+  CAMPUS_ADDRESS_COL: "campus address",
+  PHONE_COL: "phone",
+  EMAIL_COL: "email",
+};
+
+/**
+ * Find each required column by its header title. Throws if one is missing
+ * or two fields land on one column, so a bad layout stops the script
+ * instead of writing a flag into the wrong cell.
+ */
+function loadColumns(header) {
+  const found = {};
+  const used = {};
+  Object.keys(REQUIRED_HEADERS).forEach(function (name) {
+    const needle = REQUIRED_HEADERS[name];
+    let index = -1;
+    for (let i = 0; i < header.length; i++) {
+      const text = String(header[i]).replace(/\s+/g, " ").trim().toLowerCase();
+      if (text.indexOf(needle) === 0) { index = i + 1; break; }
+    }
+    if (index === -1) {
+      throw new Error("Form Responses 1 has no column titled '" + needle +
+        "'. Row 1 reads: " + JSON.stringify(header));
+    }
+    if (used[index]) {
+      throw new Error("'" + needle + "' and '" + used[index] +
+        "' resolve to the same column " + index);
+    }
+    used[index] = needle;
+    found[name] = index;
+  });
+  TIMESTAMP_COL = found.TIMESTAMP_COL;
+  CAMPUS_ADDRESS_COL = found.CAMPUS_ADDRESS_COL;
+  PHONE_COL = found.PHONE_COL;
+  EMAIL_COL = found.EMAIL_COL;
+}
 
 const ROUTES_TAB = "Routes";
 const SHUTTLES_TAB = "Shuttles";
@@ -27,9 +70,10 @@ function onFormSubmit(e) {
     const sheet = ss.getSheetByName(RESPONSES_TAB);
 
     // Find the row that was just submitted by matching the
-    // FormResponse's timestamp against column A.
+    // FormResponse's timestamp against the Timestamp column.
     const responseTimestamp = e.response.getTimestamp();
     const allData = sheet.getDataRange().getValues();
+    loadColumns(allData[0]);
 
     let thisRowIndex = -1;
     for (let i = allData.length - 1; i >= 1; i--) {

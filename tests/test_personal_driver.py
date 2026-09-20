@@ -91,8 +91,10 @@ got = read([moved, ["9/14/2026 10:00:00", "Freshman", "Kim Lee", "Illini Tower",
 check("the Driver column is found by title, not position",
       got[0]["personal_driver"] == "Peter Hahn", got[0]["personal_driver"])
 
-no_column = ["Timestamp", "Grade", "Full Name (first + last)", "Campus Address / Dorm"]
-got = read([no_column, ["9/14/2026 10:00:00", "Freshman", "Kim Lee", "Illini Tower"]])
+no_column = ["Timestamp", "Grade", "Full Name (first + last)", "Campus Address / Dorm",
+             "Phone Number", "Email"]
+got = read([no_column, ["9/14/2026 10:00:00", "Freshman", "Kim Lee", "Illini Tower",
+                        "7031110009", "k@example.com"]])
 check("no Driver column at all reads as unassigned", got[0]["personal_driver"] == "")
 
 # ---- The email lines ----

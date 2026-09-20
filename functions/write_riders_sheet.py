@@ -27,7 +27,11 @@ import google.auth
 from googleapiclient.discovery import build
 
 from config import settings
-from functions.read_riders_sheet import FORM_RESPONSES_TAB, _STOP_COL
+from functions.read_riders_sheet import (
+    FORM_RESPONSES_TAB,
+    column_letter,
+    resolve_columns,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -69,16 +73,6 @@ def get_writable_sheet_client():
     return _sheets_service
 
 
-def _column_letter(index: int) -> str:
-    """Convert a 0-indexed column number to its A1 letter (0 -> A, 26 -> AA)."""
-    letters = ""
-    index += 1
-    while index:
-        index, remainder = divmod(index - 1, 26)
-        letters = chr(65 + remainder) + letters
-    return letters
-
-
 def flag_signup_cancelled(row_number: int) -> dict:
     """Append "/cancelled" to a signup row's address cell.
 
@@ -99,11 +93,24 @@ def flag_signup_cancelled(row_number: int) -> dict:
             this as recoverable and rely on the Firestore record, which
             is what every count actually reads.
     """
-    column = _column_letter(_STOP_COL)
+    try:
+        service = get_writable_sheet_client()
+        header = (
+            service.spreadsheets()
+            .values()
+            .get(spreadsheetId=settings.RIDER_SHEET_ID, range=f"{FORM_RESPONSES_TAB}!1:1")
+            .execute()
+            .get("values", [[]])[0]
+        )
+        # The address column is found by its title, so a reordered form
+        # can't send the flag to the wrong cell.
+        column = column_letter(resolve_columns(header)["stop"])
+    except Exception as exc:
+        raise RuntimeError(f"Failed to find the address column: {exc}") from exc
+
     cell = f"{FORM_RESPONSES_TAB}!{column}{row_number}"
 
     try:
-        service = get_writable_sheet_client()
         current = (
             service.spreadsheets()
             .values()

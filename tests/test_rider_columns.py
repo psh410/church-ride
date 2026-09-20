@@ -76,12 +76,70 @@ odd[2] = "Full name"
 rider, _ = read(odd, grade_first_row)
 check("reworded headers still resolve", rider["name"] == "Peter Hahn", rider["name"])
 
-# A header that can't be found falls back to the old fixed positions.
+# A required header that can't be found fails loudly instead of guessing.
 missing = ["Timestamp", "Who", "Year", "Campus Address / Dorm", "Phone Number", "Email"]
-rider, _ = read(missing, grade_first_row)
-check("missing headers fall back to Grade in B, Name in C",
-      rider["name"] == "Peter Hahn" and rider["grade"] == "Freshman", str(rider))
+try:
+    read(missing, grade_first_row)
+    raised = False
+except sheet_mod.SheetLayoutError as exc:
+    raised = "Full Name" in str(exc) or "full name" in str(exc).lower()
+check("missing required header raises SheetLayoutError", raised)
 
+# resolve_columns directly.
+cols = sheet_mod.resolve_columns(HEADER_GRADE_FIRST)
+check("resolve_columns maps every field",
+      cols["timestamp"] == 0 and cols["grade"] == 1 and cols["name"] == 2
+      and cols["stop"] == 3 and cols["phone"] == 4 and cols["email"] == 5, str(cols))
+check("driver column is optional (-1)", cols["driver"] == -1, str(cols))
+cols = sheet_mod.resolve_columns(HEADER_GRADE_FIRST + ["Small Group", "Driver"])
+check("driver column found by title anywhere", cols.get("driver") == 7, str(cols))
+
+# Reordered columns still work.
+shuffled = ["Email", "Phone Number", "Campus Address / Dorm", "Full Name (first + last)", "Grade", "Timestamp"]
+cols = sheet_mod.resolve_columns(shuffled)
+check("shuffled columns resolve", cols["name"] == 3 and cols["timestamp"] == 5, str(cols))
+
+# Two fields cannot share one column.
+with mock.patch.dict(sheet_mod._COLUMN_SPECS, {"grade": ("full name", False, False)}):
+    try:
+        sheet_mod.resolve_columns(HEADER_GRADE_FIRST)
+        dup = False
+    except sheet_mod.SheetLayoutError:
+        dup = True
+check("one column mapped to two fields raises", dup)
+
+# Name column full of grades is caught.
+rows = [["a"] * 6] + [["t", "Peter", "Freshman", "FAR", "1", "e"]] * 5
+c = sheet_mod.resolve_columns(HEADER_NAME_FIRST)
+try:
+    sheet_mod.check_name_column([HEADER_NAME_FIRST] + [["t", "Freshman", "Peter", "FAR", "1", "e"]] * 5, c)
+    caught = False
+except sheet_mod.SheetLayoutError:
+    caught = True
+check("name column full of grades raises", caught)
+try:
+    sheet_mod.check_name_column([HEADER_NAME_FIRST] + [["t", "Peter", "Freshman", "FAR", "1", "e"]] * 5, c)
+    ok_names = True
+except sheet_mod.SheetLayoutError:
+    ok_names = False
+check("normal names pass the name check", ok_names)
+
+# Diagnostic helper.
+def diag(header, row):
+    service = mock.MagicMock()
+    service.spreadsheets().values().get().execute.return_value = {"values": [header, row]}
+    with mock.patch.object(sheet_mod, "get_sheet_client", return_value=service):
+        return sheet_mod.check_sheet_headers()
+good = diag(HEADER_GRADE_FIRST + ["Small Group", "SMS Consent (Optional)"], grade_first_row + ["", "Yes"])
+check("check_sheet_headers ok on good sheet", good["ok"], str(good))
+bad = diag(missing, grade_first_row)
+check("check_sheet_headers reports problems on bad sheet", (not bad["ok"]) and bad["problems"], str(bad))
+
+# Cancel-flagging finds the address column by header.
+import functions.write_riders_sheet as writer
+service = mock.MagicMock()
+service.spreadsheets().values().get().execute.return_value = {"values": [shuffled]}
+check("column_letter A/Z/AA", (sheet_mod.column_letter(0), sheet_mod.column_letter(25), sheet_mod.column_letter(26)) == ("A", "Z", "AA"))
 
 print()
 failed = [label for label, ok in results if not ok]

@@ -608,6 +608,22 @@ def debug_consent_column_route():
         return f"error: {exc}", 500, {"Content-Type": "text/plain"}
 
 
+@app.route("/check-sheet-headers", methods=["GET"])
+def check_sheet_headers_route():
+    """Report whether the rider sheet's headers and name column look right.
+
+    Read-only. Returns 200 when every required column is found, 409 when
+    something would stop a send (so a browser or curl shows it at a glance).
+    """
+    try:
+        from functions.read_riders_sheet import check_sheet_headers
+        report = check_sheet_headers()
+        return jsonify(report), (200 if report["ok"] else 409)
+    except Exception as exc:
+        logger.error("Sheet header check failed: %s", exc)
+        return jsonify({"ok": False, "problems": [str(exc)]}), 500
+
+
 @app.route("/check-sheet-write", methods=["GET"])
 def check_sheet_write_route():
     """Report whether the service account can write to the rider sheet.
