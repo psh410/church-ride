@@ -1068,6 +1068,23 @@ def _build_saturday_summary(
     return "\n".join(lines)
 
 
+_ZERO_WIDTH_SPACE = "\u200b"
+
+
+def _keep_plain(address: str) -> str:
+    """Stop mail apps turning a street address into an underlined map link.
+
+    Gmail and Apple Mail spot "1002 S Lincoln Ave" in plain text and link
+    it to a map. An invisible zero-width space before each space in an
+    address (anything containing a digit) breaks that detection without
+    changing how it reads. Named stops like "FAR" or "Illini Tower" have
+    no digits and are left alone.
+    """
+    if not any(ch.isdigit() for ch in address):
+        return address
+    return address.replace(" ", _ZERO_WIDTH_SPACE + " ")
+
+
 def _sort_personal_driver_riders(riders: list[dict]) -> list[dict]:
     """Order personal-driver riders by driver, then by student name.
 
@@ -1093,6 +1110,7 @@ def _format_personal_driver_rider(rider: dict) -> str:
     them yet.
     """
     stop = rider.get("stop_display") or strip_signup_flags(rider.get("stop", ""))
+    stop = _keep_plain(stop)
     if rider.get("shuttle_full"):
         stop = f"{stop} (shuttle full)"
     driver = rider.get("personal_driver") or "Unassigned"

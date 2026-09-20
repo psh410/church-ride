@@ -99,7 +99,7 @@ check("no Driver column at all reads as unassigned", got[0]["personal_driver"] =
 
 # ---- The email lines ----
 line = we._format_personal_driver_rider
-check("assigned line", line(riders["Sarah Lee"]) == "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim",
+check("assigned line", line(riders["Sarah Lee"]).replace("\u200b", "") == "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim",
       line(riders["Sarah Lee"]))
 check("shuttle-full line", line(riders["Tom Suh"]) == "Tom Suh - FAR (shuttle full) - Ellie Kim",
       line(riders["Tom Suh"]))
@@ -129,7 +129,7 @@ with mock.patch.object(we, "build_static_map_url", return_value="http://map"), \
         all_riders, counts, non_shuttle, set(), routes,
         {"FAR": "9:00 AM", "SDRP": "9:10 AM"}, {},
     )
-check("admin email lists the driver", "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim" in admin)
+check("admin email lists the driver", "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim" in admin.replace("\u200b", ""))
 check("admin email lists Unassigned", "Grace Ryoo - Illini Tower - Unassigned" in admin)
 check("admin email lists a shuttle-full rider", "Justin Kim - FAR (shuttle full) - Unassigned" in admin)
 check("admin email never prints the raw /driver flag", "FAR/driver" not in admin)
@@ -140,7 +140,7 @@ assignments = [{"route_id": "shuttle_1", "pickup_driver": "Dae Kang", "return_dr
 body = we._build_saturday_driver_assignment_body(
     "2026-09-20", assignments, all_riders, routes, {"FAR": "9:00 AM", "SDRP": "9:10 AM"})
 check("driver email has a personal driver section", "PERSONAL DRIVER RIDES" in body)
-check("driver email lists the driver", "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim" in body)
+check("driver email lists the driver", "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim" in body.replace("\u200b", ""))
 check("driver email lists Unassigned", "Grace Ryoo - Illini Tower - Unassigned" in body)
 check("the section comes after the shuttles", body.index("PERSONAL DRIVER RIDES") > body.index("SHUTTLE 2"))
 none_body = we._build_saturday_driver_assignment_body(
@@ -184,10 +184,19 @@ check("driver email uses the sorted order",
 check("admin email uses the sorted order",
       admin.index("Sarah Lee - ") < admin.index("Tom Suh - ") < admin.index("Grace Ryoo - ") < admin.index("Justin Kim - "))
 
+# ---- Addresses are not turned into links ----
+plain_line = we._format_personal_driver_rider(riders["Sarah Lee"])
+check("street address gets invisible breaks so it is not auto-linked",
+      "1002\u200b S\u200b Lincoln\u200b Ave" in plain_line, repr(plain_line))
+check("the address still reads the same once the invisible characters are removed",
+      plain_line.replace("\u200b", "") == "Sarah Lee - 1002 S Lincoln Ave - Daniel Kim", plain_line)
+check("a named stop is left untouched", "\u200b" not in we._format_personal_driver_rider(riders["Grace Ryoo"]))
+
 print()
 failed = [label for label, ok in results if not ok]
 if failed:
     print(f"{len(failed)} FAILED: {failed}")
     sys.exit(1)
 print(f"All {len(results)} checks passed.")
+
 
