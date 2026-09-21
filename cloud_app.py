@@ -624,6 +624,21 @@ def check_sheet_headers_route():
         return jsonify({"ok": False, "problems": [str(exc)]}), 500
 
 
+@app.route("/preview-driver-rebalance", methods=["GET"])
+def preview_driver_rebalance_route():
+    """Show what the driver schedule would change to match availability.
+
+    Read-only: it never saves. To save the changes, run
+    `python3 -m scripts.rebalance_drivers --apply` from the repo.
+    """
+    try:
+        from functions.rebalance_drivers import run_rebalance
+        return jsonify(run_rebalance(apply=False)), 200
+    except Exception as exc:
+        logger.error("Driver rebalance preview failed: %s", exc)
+        return jsonify({"status": "error", "error": str(exc)}), 500
+
+
 @app.route("/check-sheet-write", methods=["GET"])
 def check_sheet_write_route():
     """Report whether the service account can write to the rider sheet.
