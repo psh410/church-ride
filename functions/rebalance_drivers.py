@@ -29,6 +29,9 @@ _LEGS = ("pickup", "return")
 # (communion). Names are compared without case or extra spaces.
 COMMUNION_ELDERS = ("Peter Hahn", "Albert Lee")
 
+# Sundays with no shuttle service. Their rows are left alone.
+NO_SERVICE_DATES = ("2026-11-22", "2026-11-29")
+
 # Which Shift answers (from the driver form) can cover which leg.
 _LEG_SHIFTS = {
     "pickup": {"both", "pickup"},
@@ -139,7 +142,7 @@ def plan_rebalance(
 
     for entry in work:
         day = entry["date"]
-        if entry.get("past") or (today and day < today):
+        if entry.get("past") or (today and day < today) or day in NO_SERVICE_DATES:
             continue
         listed = availability.get(day)
         if not listed:

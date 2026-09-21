@@ -39,6 +39,12 @@ def send_monday_schedule() -> dict:
     Returns:
         dict: {"status": "sent" or "failed"}.
     """
+    # Check the Available Drivers sheet first and fix any slot whose driver
+    # is no longer available, so the schedule in this email is current.
+    # A failure here must not stop the email: it goes out with a line
+    # saying the check could not be done.
+    update_lines = _refresh_schedule_from_availability()
+
     try:
         schedule = get_semester_schedule()
     except Exception as exc:
@@ -52,7 +58,7 @@ def send_monday_schedule() -> dict:
 
     remaining = [entry for entry in schedule if entry["date"] > last_week["date"]]
 
-    body = _build_schedule_body(last_week, remaining, schedule)
+    body = _build_schedule_body(last_week, remaining, schedule, update_lines)
     monday_date = _get_this_monday()
 
     try:
@@ -77,6 +83,58 @@ def send_monday_schedule() -> dict:
 # --------------------------------------------------------------------------
 # Helpers
 # --------------------------------------------------------------------------
+def _refresh_schedule_from_availability() -> list[str]:
+    """Check the Available Drivers sheet and update the schedule if needed.
+
+    Only slots whose driver is no longer available (or an elder on a
+    first Sunday) are changed; everything else is left as planned. The
+    changes are saved to Firestore and described for the email.
+
+    Returns:
+        list[str]: Lines for the email's "schedule updates" section.
+            Says so plainly when nothing changed, and when the check
+            itself failed (in which case the schedule is unchanged).
+    """
+    try:
+        from functions.rebalance_drivers import run_rebalance
+
+        result = run_rebalance(apply=True)
+    except Exception as exc:
+        logger.error("Availability check before the Monday email failed: %s", exc)
+        return [
+            "I could not check the Available Drivers sheet this week, so the "
+            "schedule below is unchanged from last week. Please compare it "
+            "with the sheet."
+        ]
+
+    lines: list[str] = []
+    if not result["changes"] and not result["unfilled"]:
+        return ["Checked the Available Drivers sheet: no changes this week."]
+
+    if result["changes"]:
+        lines.append(
+            "I checked the Available Drivers sheet and updated the schedule. "
+            "Everything else stays as planned:"
+            if not result["errors"]
+            else "I checked the Available Drivers sheet. These changes were "
+            "needed, but some could not be saved, so please review:"
+        )
+        for change in result["changes"]:
+            lines.append(
+                f"  \u2022 {_format_short_date(change['date'])}  {change['slot']}: "
+                f"{change['old']} \u2192 {change['new'] or 'nobody'} ({change['reason']})"
+            )
+    if result["unfilled"]:
+        lines.append("")
+        lines.append("STILL NEEDS A DRIVER (nobody available can take it):")
+        for item in result["unfilled"]:
+            lines.append(
+                f"  \u2022 {_format_short_date(item['date'])}  {item['slot']}: "
+                f"{item['driver']} is unavailable"
+            )
+    return lines
+
+
 def _find_last_week(schedule: list[dict]) -> dict | None:
     """Find the semester schedule entry representing "last week".
 
@@ -104,7 +162,12 @@ def _find_last_week(schedule: list[dict]) -> dict | None:
     return max(past_or_today, key=lambda entry: entry["date"])
 
 
-def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[dict]) -> str:
+def _build_schedule_body(
+    last_week: dict,
+    remaining: list[dict],
+    schedule: list[dict],
+    update_lines: list[str] | None = None,
+) -> str:
     """Format the plain-text Monday schedule update email body.
 
     Args:
@@ -114,6 +177,9 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
             last_week, in schedule order.
         schedule: The full semester schedule (past and upcoming), used
             to calculate the semester-wide driver totals section.
+        update_lines: Lines describing what the availability check
+            changed (see _refresh_schedule_from_availability()), shown
+            right after the intro. None leaves the section out.
 
     Returns:
         str: The complete plain-text email body.
@@ -123,6 +189,12 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
     lines.append("")
     lines.append("This is the shuttle driver schedule for the rest of the Fall 2026 semester.")
     lines.append("")
+    if update_lines:
+        lines.append(_SECTION_DIVIDER)
+        lines.append("\U0001f504 SCHEDULE UPDATES THIS WEEK")
+        lines.append(_SECTION_DIVIDER)
+        lines.extend(update_lines)
+        lines.append("")
     lines.append("\U0001f4cb HOW THIS SCHEDULE WAS BUILT:")
     lines.append("Each week's drivers were chosen based on:")
     lines.append("  \u2022 Availability (drivers who marked that Sunday as free)")
@@ -141,6 +213,10 @@ def _build_schedule_body(last_week: dict, remaining: list[dict], schedule: list[
     lines.append(
         "  \u2022 A backup driver is listed each week in case the primary "
         "driver needs to swap last minute"
+    )
+    lines.append(
+        "  \u2022 Elders (Peter Hahn, Albert Lee) are not scheduled on the "
+        "first Sunday of the month because of communion"
     )
     lines.append(
         "  \u2022 Peter Hahn has more scheduling conflicts than others "

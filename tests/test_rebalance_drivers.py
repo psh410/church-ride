@@ -170,6 +170,11 @@ check("report lists the change", "Yong Wook Kim -> Sangwoo Suk" in text, text)
 check("no-change report is clear",
       "No changes" in format_report(plan_rebalance(schedule, {"2026-09-27": ["Yong Wook Kim", "Robin Varghese"]}, {}, TODAY), False))
 
+# ---- No-service Sundays are left alone ----
+schedule = [entry("2026-11-22", "Gone One", "Gone Two")]
+plan = plan_rebalance(schedule, {"2026-11-22": ["Yong Wook Kim"]}, {}, TODAY)
+check("a no-service Sunday is never changed", plan["changes"] == [] and plan["unfilled"] == [])
+
 print()
 failed = [label for label, ok in results if not ok]
 if failed:
