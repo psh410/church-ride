@@ -39,9 +39,11 @@ import logging
 from datetime import datetime
 
 from db.firestore_client import (
+    claim_rider_reminder,
     get_cancelled_phones_for_sunday,
     is_phone_opted_out,
     record_ride_cancellation,
+    release_rider_reminder,
 )
 from functions.read_riders_sheet import (
     find_signup_row_for_phone,
@@ -316,10 +318,26 @@ def send_saturday_rider_reminders(
             )
             continue
 
+        # One text per rider per Sunday, however many times this runs. A
+        # scheduler retry or a manual run on top of the scheduled one
+        # would otherwise text everybody twice.
+        try:
+            claimed = claim_rider_reminder(phone, sunday_date)
+        except RuntimeError as exc:
+            logger.error("Not texting %s: %s", phone, exc)
+            failed += 1
+            details.append(f"{name}: could not check whether already texted")
+            continue
+        if not claimed:
+            skipped += 1
+            details.append(f"{name}: already texted for this Sunday")
+            continue
+
         if send_sms(phone, body):
             sent += 1
             details.append(f"{name}: sent")
         else:
+            release_rider_reminder(phone, sunday_date)
             failed += 1
             details.append(f"{name}: send failed")
 

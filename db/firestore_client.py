@@ -26,6 +26,7 @@ RUN_LOGS_COLLECTION = "run_logs"
 SEMESTER_SCHEDULE_COLLECTION = "semester_schedule"
 SMS_OPT_OUTS_COLLECTION = "sms_opt_outs"
 RIDER_CONFIRMATIONS_COLLECTION = "rider_confirmations"
+RIDER_REMINDERS_COLLECTION = "rider_reminders_sent"
 RETURN_RIDE_REQUESTS_COLLECTION = "return_ride_requests"
 RETURN_RIDE_COUNTS_COLLECTION = "return_ride_counts"
 RIDE_CANCELLATIONS_COLLECTION = "ride_cancellations"
@@ -619,6 +620,60 @@ def record_rider_confirmed(phone: str, sunday_date: str, details: Optional[dict]
             f"Failed to record rider confirmation for phone={phone!r}, "
             f"sunday_date={sunday_date!r}: {exc}"
         ) from exc
+
+
+def claim_rider_reminder(phone: str, sunday_date: str) -> bool:
+    """Claim the one Saturday reminder text this phone gets for a Sunday.
+
+    The write only succeeds if nobody has claimed it yet, so two runs of
+    the job (a Cloud Scheduler retry, a manual run on top of the
+    scheduled one, two containers at once) can never both text the same
+    rider. Claim first, send second, and release the claim if the send
+    fails, so a retry still reaches the people who were missed.
+
+    Args:
+        phone: Phone number in E.164 form.
+        sunday_date: The Sunday in ISO "YYYY-MM-DD" form.
+
+    Returns:
+        bool: True if this call claimed it (go ahead and send), False if
+            the rider was already texted for this Sunday.
+
+    Raises:
+        RuntimeError: If Firestore can't be reached. Callers should not
+            send when the claim can't be made.
+    """
+    from google.api_core.exceptions import AlreadyExists
+
+    try:
+        client = get_client()
+        client.collection(RIDER_REMINDERS_COLLECTION).document(
+            f"{sunday_date}_{phone}"
+        ).create({"phone": phone, "sunday_date": sunday_date,
+                  "claimed_at": firestore.SERVER_TIMESTAMP})
+        return True
+    except AlreadyExists:
+        return False
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to claim rider reminder for phone={phone!r}, "
+            f"sunday_date={sunday_date!r}: {exc}"
+        ) from exc
+
+
+def release_rider_reminder(phone: str, sunday_date: str) -> None:
+    """Give back a claim after a failed send so a retry can try again."""
+    try:
+        client = get_client()
+        client.collection(RIDER_REMINDERS_COLLECTION).document(
+            f"{sunday_date}_{phone}"
+        ).delete()
+    except Exception as exc:
+        # Worst case the rider is skipped on retry. Say so loudly.
+        logger.error(
+            "Could not release rider reminder claim for phone=%r sunday_date=%r: %s",
+            phone, sunday_date, exc,
+        )
 
 
 def get_rider_confirmation(phone: str, sunday_date: str) -> Optional[dict]:

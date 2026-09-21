@@ -287,6 +287,8 @@ def _run_send(riders, opted_out=(), dry_run=False):
     sent = []
     with mock.patch.object(rr, "get_riders_for_sunday", return_value=riders), \
          mock.patch.object(rr, "get_stop_times_map", return_value={"FAR": "9:05 AM"}), \
+         mock.patch.object(rr, "claim_rider_reminder", return_value=True), \
+         mock.patch.object(rr, "release_rider_reminder"), \
          mock.patch.object(rr, "is_phone_opted_out",
                            side_effect=lambda p: p in opted_out), \
          mock.patch.object(rr, "send_sms",
@@ -340,6 +342,70 @@ def test_unusable_phone_number_is_skipped_not_fatal():
     check(result["sent"] == 1, "the good number should still be texted")
     check(result["skipped"] == 1, "the unusable number should be skipped")
     check(result["failed"] == 0, "a bad number is a skip, not a failure")
+
+
+def _run_with_claims(riders, claim, send_ok=True):
+    sent, released = [], []
+    with mock.patch.object(rr, "get_riders_for_sunday", return_value=riders), \
+         mock.patch.object(rr, "get_stop_times_map", return_value={"FAR": "9:05 AM"}), \
+         mock.patch.object(rr, "claim_rider_reminder", side_effect=claim), \
+         mock.patch.object(rr, "release_rider_reminder",
+                           side_effect=lambda p, d: released.append(p)), \
+         mock.patch.object(rr, "is_phone_opted_out", return_value=False), \
+         mock.patch.object(rr, "send_sms",
+                           side_effect=lambda to, body: sent.append(to) or send_ok):
+        result = rr.send_saturday_rider_reminders(SUNDAY)
+    return result, sent, released
+
+
+def test_a_rider_already_texted_is_not_texted_again():
+    riders = [_rider(name="Done Kim", phone="217-555-0100"),
+              _rider(name="New Park", phone="217-555-0200")]
+    result, sent, _ = _run_with_claims(riders, lambda p, d: p != "+12175550100")
+    check(sent == ["+12175550200"], f"only the rider not yet texted should get it: {sent}")
+    check(result["skipped"] == 1 and result["sent"] == 1, str(result))
+
+
+def test_a_failed_send_gives_the_claim_back_so_a_retry_can_try_again():
+    result, sent, released = _run_with_claims(
+        [_rider(phone="217-555-0100")], lambda p, d: True, send_ok=False)
+    check(result["failed"] == 1, str(result))
+    check(released == ["+12175550100"], f"the claim should be released: {released}")
+
+
+def test_if_the_claim_cannot_be_made_nobody_is_texted():
+    def boom(p, d):
+        raise RuntimeError("firestore down")
+    result, sent, _ = _run_with_claims([_rider(phone="217-555-0100")], boom)
+    check(sent == [], "no text should go out when we cannot tell if it already did")
+    check(result["failed"] == 1, str(result))
+
+
+def test_running_the_job_twice_texts_each_rider_once():
+    claimed = set()
+
+    def claim(p, d):
+        if (p, d) in claimed:
+            return False
+        claimed.add((p, d))
+        return True
+
+    riders = [_rider(name="A Kim", phone="217-555-0100"), _rider(name="B Lee", phone="217-555-0200")]
+    _, first, _ = _run_with_claims(riders, claim)
+    _, second, _ = _run_with_claims(riders, claim)
+    check(len(first) == 2 and second == [], f"first {first}, second {second}")
+
+
+def test_dry_run_does_not_claim_anything():
+    riders = [_rider(phone="217-555-0100")]
+    calls = []
+    with mock.patch.object(rr, "get_riders_for_sunday", return_value=riders), \
+         mock.patch.object(rr, "get_stop_times_map", return_value={"FAR": "9:05 AM"}), \
+         mock.patch.object(rr, "claim_rider_reminder", side_effect=lambda p, d: calls.append(p) or True), \
+         mock.patch.object(rr, "is_phone_opted_out", return_value=False), \
+         mock.patch.object(rr, "send_sms") as sms:
+        rr.send_saturday_rider_reminders(SUNDAY, dry_run=True)
+    check(calls == [] and not sms.called, "a dry run must not claim or send")
 
 
 def main() -> int:

@@ -444,6 +444,11 @@ def send_saturday_rider_reminder_route():
     try:
         from functions.rider_reminder import send_saturday_rider_reminders
         result = send_saturday_rider_reminders()
+        if result.get("failed"):
+            # Safe to retry: each rider is claimed before they are texted,
+            # so a retry only reaches the ones who were missed.
+            logger.error("Rider reminder had failures; returning 500 to retry: %s", result)
+            return jsonify(result), 500
         return _scheduled_job_response(result)
     except Exception as exc:
         logger.error("Saturday rider reminder failed: %s", exc)
