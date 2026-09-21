@@ -1,6 +1,6 @@
 # Saturday night rider reminder, and the SKIP keyword that answers it.
 #
-# At 9:30pm Saturday every consenting rider gets one text naming
+# At 9pm Saturday every consenting rider gets one text naming
 # their stop and pickup time for the morning, ending with "Reply SKIP to
 # cancel". A rider who replies gives up their seat: the cancellation is
 # recorded in Firestore, their signup row is flagged "/cancelled" in the
@@ -19,12 +19,10 @@
 # international students and "I'm out" does not travel; see
 # claude/sms-keywords.md.
 #
-# The 9:30pm slot is deliberate and so is what sits after it. The
-# saturday-night-update job, which sends drivers their confirmed rider
-# list, was moved to 10:30pm so this runs first. A cancellation is only
-# worth catching if it lands before the drivers are told who to expect;
-# the other way round, this improves a count nobody reads and leaves the
-# email people actually act on stale.
+# The 9pm slot is deliberate and so is what sits after it. The Saturday
+# 9:30pm update email to the ride team runs half an hour later, so its
+# counts already reflect anyone who cancelled in between. A cancellation
+# is only worth catching if it lands before the counts people act on.
 #
 # Everyone who signed up hears something. Shuttle riders get their stop
 # and pickup time. Riders whose address is off-route, or who were past
@@ -237,7 +235,7 @@ def send_saturday_rider_reminders(
 
     Args:
         sunday_date: Optional ISO "YYYY-MM-DD" override. Defaults to the
-            coming Sunday, which on a Saturday 9:30pm Central run is
+            coming Sunday, which on a Saturday 9pm Central run is
             already "today" in UTC and so resolves correctly.
         dry_run: If True, builds every message and works out who would
             be skipped, but sends nothing. This exists because the only
