@@ -98,6 +98,11 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
     """
     # Every send reads the latest Routes tab, never a saved copy.
     clear_route_caches()
+
+    # Check the Available Drivers sheet before reading the schedule, so a
+    # conflict marked since Monday reaches the right people in this email.
+    update_lines = _refresh_schedule_for_reminder(sunday_date)
+
     try:
         schedule = get_semester_schedule()
     except Exception as exc:
@@ -160,7 +165,9 @@ def send_wednesday_reminder(sunday_date: str) -> dict:
     if backup_email:
         cc_parts.append(backup_email)
 
-    body = _build_wednesday_reminder_body(sunday_date, assignments, routes, backup_name)
+    body = _build_wednesday_reminder_body(
+        sunday_date, assignments, routes, backup_name, update_lines
+    )
 
     try:
         sent = send_email(
@@ -482,6 +489,7 @@ def _build_wednesday_reminder_body(
     assignments: list[dict],
     routes: list[dict],
     backup: str | None = None,
+    update_lines: list[str] | None = None,
 ) -> str:
     """Build the Wednesday reminder email body for assigned drivers.
 
@@ -495,6 +503,10 @@ def _build_wednesday_reminder_body(
             return_driver (or plain driver name if not split).
         routes: Route data from get_routes(), with stops and times.
         backup: Name of this week's backup driver, or None.
+        update_lines: Lines describing schedule changes found by the
+            pre-send availability check (see
+            _refresh_schedule_for_reminder()), shown right after the
+            intro. None or empty leaves the section out.
 
     Returns:
         str: The full email body text.
@@ -511,6 +523,13 @@ def _build_wednesday_reminder_body(
         f"this Sunday, {sunday_full} at Covenant Fellowship Church."
     )
     lines.append("")
+
+    if update_lines:
+        lines.append(_SECTION_DIVIDER)
+        lines.append("\U0001f504 SCHEDULE UPDATE")
+        lines.append(_SECTION_DIVIDER)
+        lines.extend(update_lines)
+        lines.append("")
 
     for assignment in assignments:
         route_id = assignment["route_id"]
@@ -1100,6 +1119,69 @@ def _sort_personal_driver_riders(riders: list[dict]) -> list[dict]:
             str(r.get("name", "")).lower(),
         ),
     )
+
+
+def _refresh_schedule_for_reminder(sunday_date: str) -> list[str]:
+    """Check the Available Drivers sheet and update the schedule before sending.
+
+    Same rules as the Monday email: only a slot whose driver is no longer
+    available (or an elder on a first Sunday) changes, and the change is
+    saved. Changes for this Sunday come first, since that is what the
+    drivers reading the email need; changes to later Sundays follow.
+
+    A failed check is logged and does not stop the reminder: drivers
+    still get their email, based on the schedule as saved.
+
+    Args:
+        sunday_date: This reminder's Sunday, ISO "YYYY-MM-DD".
+
+    Returns:
+        list[str]: Lines for the email's update section, or an empty
+            list when nothing changed.
+    """
+    try:
+        from functions.rebalance_drivers import run_rebalance
+
+        result = run_rebalance(apply=True)
+    except Exception as exc:
+        logger.error("Availability check before the Wednesday reminder failed: %s", exc)
+        return []
+
+    this_week = [c for c in result["changes"] if c["date"] == sunday_date]
+    later = [c for c in result["changes"] if c["date"] != sunday_date]
+    stuck = result["unfilled"]
+    lines: list[str] = []
+
+    if this_week:
+        lines.append("A driver change was made for this Sunday:")
+        for change in this_week:
+            lines.append(
+                f"  \u2022 {change['slot']}: {change['old']} \u2192 "
+                f"{change['new'] or 'nobody'} ({change['reason']})"
+            )
+    for item in [u for u in stuck if u["date"] == sunday_date]:
+        lines.append(
+            f"  \u2022 STILL NEEDS A DRIVER: {item['slot']} "
+            f"({item['driver']} is unavailable). Please contact Dae."
+        )
+    if later or [u for u in stuck if u["date"] != sunday_date]:
+        if lines:
+            lines.append("")
+        lines.append("Other upcoming changes after checking the availability sheet:")
+        for change in later:
+            lines.append(
+                f"  \u2022 {_format_short_date(change['date'])}  {change['slot']}: "
+                f"{change['old']} \u2192 {change['new'] or 'nobody'}"
+            )
+        for item in [u for u in stuck if u["date"] != sunday_date]:
+            lines.append(
+                f"  \u2022 {_format_short_date(item['date'])}  {item['slot']}: "
+                f"STILL NEEDS A DRIVER ({item['driver']} is unavailable)"
+            )
+    if result["errors"]:
+        lines.append("")
+        lines.append("Some updates could not be saved. Please check the schedule.")
+    return lines
 
 
 def _format_personal_driver_rider(rider: dict) -> str:
