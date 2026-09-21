@@ -7,7 +7,7 @@
 # slot whose driver is still available stays exactly as it is. Only a slot
 # whose driver is no longer listed as available for that Sunday is filled
 # again, by the available driver with the fewest drives across the
-# semester, preferring someone who is not driving the week before or after.
+# semester (drivers may drive week to week; adjacency only breaks ties).
 # New drivers start at zero, so they are picked up first until their load
 # matches everyone else's.
 #
@@ -101,11 +101,12 @@ def _days_since_last_drive(name: str, day: str, schedule: list[dict]) -> int:
     return 10_000 if best is None else best
 
 
-# Driving the Sunday right before or after another one counts like this many
-# extra drives when picking a replacement. 1.5 means a back to back driver
-# is passed over for anyone with at most one more drive, but not for
-# someone who is already two or more drives ahead: fairness still wins.
-BACK_TO_BACK_PENALTY = 1.5
+# Driving the Sunday right before or after another one is fine: drivers can
+# go week to week. It only breaks a tie. When two drivers have the same
+# number of drives, the one who is not driving an adjacent Sunday goes
+# first. It is worth less than a single drive, so it never outweighs
+# fairness.
+BACK_TO_BACK_PENALTY = 0.5
 
 
 def _drives_adjacent(name: str, day: str, schedule: list[dict]) -> bool:
@@ -208,6 +209,7 @@ def plan_rebalance(
                 key=lambda n: (
                     drives.get(n, 0)
                     + (BACK_TO_BACK_PENALTY if _drives_adjacent(n, day, work) else 0),
+                    drives.get(n, 0),
                     -_days_since_last_drive(n, day, work),
                     n,
                 ),
@@ -217,8 +219,6 @@ def plan_rebalance(
             entry[f"{shuttle}_{leg}"] = display.get(new, new) if new else None
 
         def note_change(slot: str, old: str, new: str | None, why: str) -> None:
-            if new and not slot.startswith("Backup") and _drives_adjacent(new, day, work):
-                why += "; drives the week before or after too, no better option"
             changes.append({"date": day, "slot": slot, "old": old,
                             "new": display.get(new, new) if new else None,
                             "reason": why})

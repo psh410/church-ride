@@ -199,8 +199,6 @@ avail = {"2026-10-04": ["Sangwoo Suk", "Josiah Chong", "Yong Wook Kim"]}
 plan = plan_rebalance(schedule, avail, {}, TODAY)
 check("fairness still wins when the gap is two or more drives",
       plan["schedule"][1]["shuttle_1"] == "Sangwoo Suk", plan["schedule"][1]["shuttle_1"])
-check("an unavoidable back to back is said so in the report",
-      any("week before or after" in c["reason"] for c in plan["changes"]), str(plan["changes"]))
 
 # The week after counts too.
 schedule = [
@@ -223,6 +221,33 @@ check("no-service Sundays are not counted as back to back or as drives",
       plan["schedule"][1]["shuttle_1"] == "Sangwoo Suk", plan["schedule"][1]["shuttle_1"])
 check("no-service Sundays do not add to drive counts",
       "sangwoo suk" not in plan["drives_before"], str(plan["drives_before"]))
+
+# ---- Week to week is fine: fairness comes first ----
+schedule = [
+    entry("2026-09-27", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-04", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-11", "Gone One", "Yong Wook Kim"),
+    entry("2026-10-18", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-25", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-11-08", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-11-15", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-12-06", "Sangwoo Suk", "Robin Varghese"),
+]
+avail = {"2026-10-11": ["Dae Kang", "Sangwoo Suk", "Yong Wook Kim"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("a driver well behind on drives can take several weeks in a row",
+      plan["schedule"][2]["shuttle_1"] == "Dae Kang", plan["schedule"][2]["shuttle_1"])
+
+# With equal drives, the one not driving the neighbouring week goes first.
+schedule = [
+    entry("2026-10-04", "Aa One", "Robin Varghese"),
+    entry("2026-10-11", "Gone One", "Yong Wook Kim"),
+    entry("2026-10-25", "Bb Two", "Robin Varghese"),
+]
+avail = {"2026-10-11": ["Aa One", "Bb Two", "Yong Wook Kim"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("equal drives: the driver not on the neighbouring Sunday is picked",
+      plan["schedule"][1]["shuttle_1"] == "Bb Two", plan["schedule"][1]["shuttle_1"])
 
 print()
 failed = [label for label, ok in results if not ok]
