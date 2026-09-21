@@ -175,6 +175,55 @@ schedule = [entry("2026-11-22", "Gone One", "Gone Two")]
 plan = plan_rebalance(schedule, {"2026-11-22": ["Yong Wook Kim"]}, {}, TODAY)
 check("a no-service Sunday is never changed", plan["changes"] == [] and plan["unfilled"] == [])
 
+# ---- Try not to schedule back to back weeks ----
+# Sangwoo drove 9/27 (the week before), Josiah did not. Both have one drive.
+schedule = [
+    entry("2026-09-27", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-10-04", "Gone One", "Yong Wook Kim"),
+    entry("2026-10-25", "Josiah Chong", "Robin Varghese"),
+]
+avail = {"2026-10-04": ["Sangwoo Suk", "Josiah Chong", "Yong Wook Kim", "Robin Varghese"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("the driver who drove last week is passed over when someone else is close",
+      plan["schedule"][1]["shuttle_1"] == "Josiah Chong", plan["schedule"][1]["shuttle_1"])
+
+# Someone two or more drives ahead does not lose out to a back to back driver.
+schedule = [
+    entry("2026-09-27", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-10-04", "Gone One", "Yong Wook Kim"),
+    entry("2026-10-11", "Josiah Chong", "Robin Varghese"),
+    entry("2026-10-25", "Josiah Chong", "Robin Varghese"),
+    entry("2026-11-08", "Josiah Chong", "Robin Varghese"),
+]
+avail = {"2026-10-04": ["Sangwoo Suk", "Josiah Chong", "Yong Wook Kim"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("fairness still wins when the gap is two or more drives",
+      plan["schedule"][1]["shuttle_1"] == "Sangwoo Suk", plan["schedule"][1]["shuttle_1"])
+check("an unavoidable back to back is said so in the report",
+      any("week before or after" in c["reason"] for c in plan["changes"]), str(plan["changes"]))
+
+# The week after counts too.
+schedule = [
+    entry("2026-10-04", "Gone One", "Yong Wook Kim"),
+    entry("2026-10-11", "Sangwoo Suk", "Robin Varghese"),
+]
+avail = {"2026-10-04": ["Sangwoo Suk", "Josiah Chong", "Yong Wook Kim"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("the driver scheduled the week after is also passed over",
+      plan["schedule"][0]["shuttle_1"] == "Josiah Chong", plan["schedule"][0]["shuttle_1"])
+
+# A Sunday with no shuttle service does not count as a neighbour, or as a drive.
+schedule = [
+    entry("2026-11-22", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-11-15", "Gone One", "Yong Wook Kim"),
+]
+avail = {"2026-11-15": ["Sangwoo Suk", "Zed Zane", "Yong Wook Kim"]}
+plan = plan_rebalance(schedule, avail, {}, "2026-09-20")
+check("no-service Sundays are not counted as back to back or as drives",
+      plan["schedule"][1]["shuttle_1"] == "Sangwoo Suk", plan["schedule"][1]["shuttle_1"])
+check("no-service Sundays do not add to drive counts",
+      "sangwoo suk" not in plan["drives_before"], str(plan["drives_before"]))
+
 print()
 failed = [label for label, ok in results if not ok]
 if failed:
