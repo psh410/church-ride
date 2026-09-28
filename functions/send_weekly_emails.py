@@ -1162,7 +1162,7 @@ def _refresh_schedule_for_reminder(sunday_date: str) -> list[str]:
     for item in [u for u in stuck if u["date"] == sunday_date]:
         lines.append(
             f"  \u2022 STILL NEEDS A DRIVER: {item['slot']} "
-            f"({item['driver']} is unavailable). Please contact Dae."
+            f"({item.get('note') or item['driver'] + ' is unavailable'}). Please contact Dae."
         )
     if later or [u for u in stuck if u["date"] != sunday_date]:
         if lines:
@@ -1176,7 +1176,7 @@ def _refresh_schedule_for_reminder(sunday_date: str) -> list[str]:
         for item in [u for u in stuck if u["date"] != sunday_date]:
             lines.append(
                 f"  \u2022 {_format_short_date(item['date'])}  {item['slot']}: "
-                f"STILL NEEDS A DRIVER ({item['driver']} is unavailable)"
+                f"STILL NEEDS A DRIVER ({item.get('note') or item['driver'] + ' is unavailable'})"
             )
     if result["errors"]:
         lines.append("")

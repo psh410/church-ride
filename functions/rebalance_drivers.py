@@ -7,7 +7,13 @@
 # slot whose driver is still available stays exactly as it is. Only a slot
 # whose driver is no longer listed as available for that Sunday is filled
 # again, by the available driver with the fewest drives across the
-# semester (drivers may drive week to week; adjacency only breaks ties).
+# semester (drivers may drive week to week, up to MAX_WEEKS_IN_A_ROW;
+# adjacency otherwise only breaks ties).
+#
+# The one exception to "leave working slots alone": nobody drives more
+# than MAX_WEEKS_IN_A_ROW Sundays in a row. A driver whose run would pass
+# that limit is taken off the later Sunday and the slot is filled the
+# same way as an unavailable driver's.
 # New drivers start at zero, so they are picked up first until their load
 # matches everyone else's.
 #
@@ -101,8 +107,59 @@ def _days_since_last_drive(name: str, day: str, schedule: list[dict]) -> int:
     return 10_000 if best is None else best
 
 
+# Most Sundays in a row one person may drive. A no-service Sunday breaks a
+# run, since nobody drives it. Backup duty does not count as driving.
+MAX_WEEKS_IN_A_ROW = 2
+
+
+def _run_length(
+    name: str,
+    day: str,
+    schedule: list[dict],
+    step: int,
+    availability: dict[str, set[str]] | None = None,
+) -> int:
+    """How many Sundays in a row `name` drives next to `day`, not counting it.
+
+    Walks one week at a time in one direction (step=-7 back, step=7
+    forward) and stops at the first Sunday they are not on a shuttle, a
+    no-service Sunday, or a Sunday missing from the schedule.
+
+    Looking forward, a later Sunday where they are no longer listed as
+    available does not count: that slot is about to be given to someone
+    else, so it must not block them from taking this one.
+    """
+    by_date = {e["date"]: e for e in schedule}
+    count = 0
+    current = date.fromisoformat(day)
+    while True:
+        current += timedelta(days=step)
+        iso = current.isoformat()
+        entry = by_date.get(iso)
+        if iso in NO_SERVICE_DATES or entry is None or name not in _shuttle_drivers_on(entry):
+            return count
+        if step > 0 and availability and iso in availability and name not in availability[iso]:
+            return count
+        count += 1
+
+
+def _would_exceed_run(
+    name: str,
+    day: str,
+    schedule: list[dict],
+    availability: dict[str, set[str]] | None = None,
+) -> bool:
+    """True if driving `day` would put `name` over MAX_WEEKS_IN_A_ROW."""
+    run = (
+        _run_length(name, day, schedule, -7)
+        + 1
+        + _run_length(name, day, schedule, 7, availability)
+    )
+    return run > MAX_WEEKS_IN_A_ROW
+
+
 # Driving the Sunday right before or after another one is fine: drivers can
-# go week to week. It only breaks a tie. When two drivers have the same
+# go week to week, up to MAX_WEEKS_IN_A_ROW. It only breaks a tie. When two drivers have the same
 # number of drives, the one who is not driving an adjacent Sunday goes
 # first. It is worth less than a single drive, so it never outweighs
 # fairness.
@@ -167,6 +224,8 @@ def plan_rebalance(
     skipped: list[str] = []
     touched: dict[str, set[str]] = {}
 
+    avail_by_day = {d: {_norm(n) for n in names} for d, names in availability.items()}
+
     for entry in work:
         day = entry["date"]
         if entry.get("past") or (today and day < today) or day in NO_SERVICE_DATES:
@@ -181,16 +240,33 @@ def plan_rebalance(
             elders_out = {_norm(n) for n in COMMUNION_ELDERS}
             avail -= elders_out
 
+        # Anyone already MAX_WEEKS_IN_A_ROW deep by the Sunday before comes
+        # off this one. Sundays are handled in date order and the schedule
+        # is updated as it goes, so an earlier fix is seen by later weeks.
+        streak_out = {
+            n for n in _shuttle_drivers_on(entry)
+            if _run_length(n, day, work, -7) >= MAX_WEEKS_IN_A_ROW
+        }
+        backup_avail = set(avail)
+        avail -= streak_out
+
         def why(old: str) -> str:
             if _norm(old) in elders_out:
                 return "elder, first Sunday (communion)"
-            return "no longer available"
+            if _norm(old) in streak_out:
+                return f"{display_name(old)} would drive {MAX_WEEKS_IN_A_ROW + 1} Sundays in a row"
+            return f"{display_name(old)} no longer available"
+
+        def display_name(old: str) -> str:
+            return " ".join(str(old).split()).split(" ")[0]
 
         def candidates(leg: str, need_both: bool = False) -> list[str]:
             already = _drivers_on(entry)
             out = []
             for name in avail:
                 if name in already:
+                    continue
+                if _would_exceed_run(name, day, work, avail_by_day):
                     continue
                 shift = _norm(shifts.get(name, "Both"))
                 if need_both:
@@ -263,7 +339,10 @@ def plan_rebalance(
                 if new is None:
                     missed.append({"date": day, "slot": f"{label} {leg}",
                                    "driver": old,
-                                   "reason": why(old) + "; no available driver can take it"})
+                                   "reason": why(old) + "; no available driver can take it",
+                                   "note": (f"{old} would drive {MAX_WEEKS_IN_A_ROW + 1} Sundays "
+                                            "in a row and nobody else is free")
+                                   if _norm(old) in streak_out else None})
                     continue
                 assign(shuttle, leg, new)
                 note_change(f"{label} {leg}", old, new, why(old))
@@ -279,8 +358,8 @@ def plan_rebalance(
                 entry[shuttle] = _slot_driver(entry, shuttle, "pickup")
 
         backup = entry.get("backup")
-        if backup and _norm(backup) not in avail:
-            pool = [n for n in avail if n not in _drivers_on(entry)]
+        if backup and _norm(backup) not in backup_avail:
+            pool = [n for n in backup_avail if n not in _drivers_on(entry)]
             new = pick(pool)
             entry["backup"] = display.get(new, new) if new else None
             note_change("Backup", backup, new, why(backup))
@@ -299,6 +378,10 @@ def plan_rebalance(
                 fields[f"{shuttle}_return"] = entry.get(f"{shuttle}_return")
         if "backup" in parts:
             fields["backup"] = entry.get("backup")
+        if entry.get("note"):
+            # The note explained a hand-made choice that no longer stands.
+            fields["note"] = None
+            entry["note"] = None
         updates[entry["id"]] = fields
 
     return {

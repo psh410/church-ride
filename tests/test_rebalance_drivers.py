@@ -1,7 +1,8 @@
 # Pins down the rules for changing the semester driver schedule when
 # availability changes: keep everything that still works, replace only the
-# slots that don't, choose the fairest replacement, and keep the elders off
-# the first Sunday of the month (communion).
+# slots that don't, choose the fairest replacement, keep the elders off
+# the first Sunday of the month (communion), and never schedule anyone for
+# more than 2 Sundays in a row.
 #
 # Run it directly (no pytest needed), from the repo root:
 #
@@ -222,21 +223,134 @@ check("no-service Sundays are not counted as back to back or as drives",
 check("no-service Sundays do not add to drive counts",
       "sangwoo suk" not in plan["drives_before"], str(plan["drives_before"]))
 
-# ---- Week to week is fine: fairness comes first ----
+# ---- Week to week is fine, but never more than 2 Sundays in a row ----
 schedule = [
     entry("2026-09-27", "Dae Kang", "Robin Varghese"),
-    entry("2026-10-04", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-04", "Aa One", "Robin Varghese"),
     entry("2026-10-11", "Gone One", "Yong Wook Kim"),
-    entry("2026-10-18", "Dae Kang", "Robin Varghese"),
-    entry("2026-10-25", "Sangwoo Suk", "Robin Varghese"),
-    entry("2026-11-08", "Sangwoo Suk", "Robin Varghese"),
-    entry("2026-11-15", "Sangwoo Suk", "Robin Varghese"),
-    entry("2026-12-06", "Sangwoo Suk", "Robin Varghese"),
+    entry("2026-10-18", "Dae Kang", "Bb Two"),
+    entry("2026-10-25", "Sangwoo Suk", "Bb Two"),
+    entry("2026-11-08", "Sangwoo Suk", "Cc Three"),
+    entry("2026-11-15", "Sangwoo Suk", "Dd Four"),
 ]
 avail = {"2026-10-11": ["Dae Kang", "Sangwoo Suk", "Yong Wook Kim"]}
 plan = plan_rebalance(schedule, avail, {}, TODAY)
-check("a driver well behind on drives can take several weeks in a row",
+check("a driver behind on drives can take two weeks in a row",
       plan["schedule"][2]["shuttle_1"] == "Dae Kang", plan["schedule"][2]["shuttle_1"])
+
+# The real 10/4 to 10/25 case: Dae on four Sundays running. Only the third
+# comes off; after that his run is broken, so the fourth stays.
+dae_run = [
+    entry("2026-09-27", "Ryan Bielak", "Robin Varghese"),
+    entry("2026-10-04", "Josiah Chong", "Dae Kang", "Yong Wook Kim"),
+    entry("2026-10-11", "Ryan Bielak", "Dae Kang", "Robin Varghese", s1r="Yong Wook Kim"),
+    entry("2026-10-18", "Sangwoo Suk", "Dae Kang", "Ryan Bielak"),
+    entry("2026-10-25", "Dae Kang", "Robin Varghese", "Albert Lee"),
+]
+dae_avail = {
+    "2026-10-04": ["Peter Hahn", "Yong Wook Kim", "Ryan Bielak", "Sangwoo Suk", "Dae Kang", "Josiah Chong"],
+    "2026-10-11": ["Yong Wook Kim", "Robin Varghese", "Ryan Bielak", "Sangwoo Suk", "Dae Kang"],
+    "2026-10-18": ["Ryan Bielak", "Sangwoo Suk", "Dae Kang", "Josiah Chong"],
+    "2026-10-25": ["Robin Varghese", "Ryan Bielak", "Albert Lee", "Dae Kang"],
+}
+plan = plan_rebalance(dae_run, dae_avail, {"Ryan Bielak": "Pickup"}, TODAY)
+s = {e["date"]: e for e in plan["schedule"]}
+check("the third Sunday in a row is taken off",
+      s["2026-10-18"]["shuttle_2"] != "Dae Kang", s["2026-10-18"]["shuttle_2"])
+check("the first two stay", s["2026-10-04"]["shuttle_2"] == "Dae Kang" and s["2026-10-11"]["shuttle_2"] == "Dae Kang")
+check("the fourth stays once the run is broken", s["2026-10-25"]["shuttle_1"] == "Dae Kang", s["2026-10-25"]["shuttle_1"])
+check("exactly one change is made", len(plan["changes"]) == 1, str(plan["changes"]))
+check("the change says why", "3 Sundays in a row" in plan["changes"][0]["reason"], str(plan["changes"]))
+check("the replacement is not also pushed past two in a row",
+      s["2026-10-18"]["shuttle_2"] == "Josiah Chong", s["2026-10-18"]["shuttle_2"])
+
+# Regression from the real 9/28 preview: Josiah was on 10/25 (now
+# unavailable) and 11/1. Counting 10/25 as still his made 10/18 look like
+# a third week in a row, so nobody took Dae's 10/18 slot and the fix
+# cascaded into 10/25 and 11/8. A later Sunday the driver is about to lose
+# must not count toward their run.
+real = [
+    entry("2026-09-20", "Sangwoo Suk", "Yong Wook Kim"),
+    entry("2026-09-27", "Ryan Bielak", "Robin Varghese", s1r="Sangwoo Suk"),
+    entry("2026-10-04", "Josiah Chong", "Dae Kang", "Yong Wook Kim"),
+    entry("2026-10-11", "Ryan Bielak", "Dae Kang", "Robin Varghese", s1r="Peter Hahn"),
+    entry("2026-10-18", "Sangwoo Suk", "Dae Kang", "Ryan Bielak"),
+    entry("2026-10-25", "Josiah Chong", "Robin Varghese", "Albert Lee"),
+    entry("2026-11-01", "Ryan Bielak", "Yong Wook Kim", "Sangwoo Suk", s1r="Josiah Chong"),
+    entry("2026-11-08", "Josiah Chong", "Peter Hahn", "Robin Varghese"),
+]
+real_avail = {
+    "2026-10-04": ["Peter Hahn", "Yong Wook Kim", "Ryan Bielak", "Sangwoo Suk", "Dae Kang", "Josiah Chong"],
+    "2026-10-11": ["Yong Wook Kim", "Robin Varghese", "Ryan Bielak", "Sangwoo Suk", "Dae Kang"],
+    "2026-10-18": ["Ryan Bielak", "Sangwoo Suk", "Dae Kang", "Josiah Chong"],
+    "2026-10-25": ["Robin Varghese", "Ryan Bielak", "Albert Lee", "Dae Kang"],
+    "2026-11-01": ["Yong Wook Kim", "Ryan Bielak", "Albert Lee", "Sangwoo Suk", "Josiah Chong"],
+    "2026-11-08": ["Peter Hahn", "Yong Wook Kim", "Robin Varghese", "Ryan Bielak", "Sangwoo Suk", "Dae Kang", "Josiah Chong"],
+}
+plan = plan_rebalance(real, real_avail, {"Ryan Bielak": "Pickup"}, TODAY)
+s = {e["date"]: e for e in plan["schedule"]}
+check("real case: Josiah takes Dae's 10/18", s["2026-10-18"]["shuttle_2"] == "Josiah Chong", s["2026-10-18"]["shuttle_2"])
+check("real case: Dae takes Josiah's 10/25 whole day",
+      s["2026-10-25"]["shuttle_1_pickup"] == "Dae Kang" and s["2026-10-25"]["shuttle_1_return"] == "Dae Kang", str(s["2026-10-25"]))
+check("real case: 11/8 is left alone", s["2026-11-08"]["shuttle_1"] == "Josiah Chong", s["2026-11-08"]["shuttle_1"])
+check("real case: nothing left unfilled", plan["unfilled"] == [], str(plan["unfilled"]))
+check("real case: exactly three changes", len(plan["changes"]) == 3, str(plan["changes"]))
+
+# If nobody can take a third-in-a-row slot, the driver stays and the note
+# says why, rather than calling them unavailable.
+schedule = [
+    entry("2026-10-04", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-11", "Dae Kang", "Yong Wook Kim"),
+    entry("2026-10-18", "Dae Kang", "Sangwoo Suk"),
+]
+avail = {"2026-10-18": ["Dae Kang", "Sangwoo Suk"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("no replacement: the driver stays", plan["schedule"][2]["shuttle_1"] == "Dae Kang")
+check("no replacement: flagged with a clear note",
+      plan["unfilled"] and "in a row" in (plan["unfilled"][0].get("note") or ""), str(plan["unfilled"]))
+
+# A hand-made reason stays while its Sunday is untouched, and is cleared
+# once the automatic check has to change that Sunday.
+schedule = [entry("2026-10-25", "Albert Lee", "Robin Varghese", "Dae Kang")]
+schedule[0]["note"] = "Spreading drives more evenly."
+plan = plan_rebalance(schedule, {"2026-10-25": ["Albert Lee", "Robin Varghese", "Dae Kang"]}, {}, TODAY)
+check("a reason is kept while its Sunday still works", plan["schedule"][0].get("note") and plan["updates"] == {})
+plan = plan_rebalance(schedule, {"2026-10-25": ["Robin Varghese", "Dae Kang", "Ryan Bielak"]}, {}, TODAY)
+check("a reason is cleared when that Sunday has to change", plan["updates"]["2026-10-25"].get("note", "x") is None, str(plan["updates"]))
+
+# A candidate whose run would pass the limit is never chosen, even with the
+# fewest drives.
+schedule = [
+    entry("2026-10-04", "Low Count", "Robin Varghese"),
+    entry("2026-10-11", "Low Count", "Yong Wook Kim"),
+    entry("2026-10-18", "Gone One", "Sangwoo Suk"),
+    entry("2026-10-25", "Many A", "Robin Varghese"),
+    entry("2026-11-08", "Many A", "Robin Varghese"),
+]
+avail = {"2026-10-18": ["Low Count", "Many A", "Sangwoo Suk"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("a candidate who would drive 3 in a row is skipped",
+      plan["schedule"][2]["shuttle_1"] == "Many A", plan["schedule"][2]["shuttle_1"])
+
+# Backup duty does not count as driving, and is not taken away by the rule.
+schedule = [
+    entry("2026-10-04", "Dae Kang", "Robin Varghese"),
+    entry("2026-10-11", "Dae Kang", "Yong Wook Kim"),
+    entry("2026-10-18", "Sangwoo Suk", "Josiah Chong", "Dae Kang"),
+]
+avail = {"2026-10-18": ["Dae Kang", "Sangwoo Suk", "Josiah Chong"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("backup after two drives in a row is fine", plan["changes"] == [], str(plan["changes"]))
+
+# A no-service Sunday breaks a run.
+schedule = [
+    entry("2026-11-08", "Dae Kang", "Robin Varghese"),
+    entry("2026-11-15", "Dae Kang", "Yong Wook Kim"),
+    entry("2026-12-06", "Dae Kang", "Josiah Chong"),
+]
+avail = {"2026-12-06": ["Dae Kang", "Josiah Chong", "Sangwoo Suk"]}
+plan = plan_rebalance(schedule, avail, {}, TODAY)
+check("a no-service break resets the run", plan["changes"] == [], str(plan["changes"]))
 
 # With equal drives, the one not driving the neighbouring week goes first.
 schedule = [

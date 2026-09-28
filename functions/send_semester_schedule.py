@@ -87,7 +87,7 @@ def _refresh_schedule_from_availability() -> list[str]:
     """Check the Available Drivers sheet and update the schedule if needed.
 
     Only slots whose driver is no longer available (or an elder on a
-    first Sunday) are changed; everything else is left as planned. The
+    first Sunday, or a driver past 2 Sundays in a row) are changed; everything else is left as planned. The
     changes are saved to Firestore and described for the email.
 
     Returns:
@@ -130,7 +130,7 @@ def _refresh_schedule_from_availability() -> list[str]:
         for item in result["unfilled"]:
             lines.append(
                 f"  \u2022 {_format_short_date(item['date'])}  {item['slot']}: "
-                f"{item['driver']} is unavailable"
+                + (item.get("note") or f"{item['driver']} is unavailable")
             )
     return lines
 
@@ -196,15 +196,14 @@ def _build_schedule_body(
         lines.extend(update_lines)
         lines.append("")
     lines.append("\U0001f4cb HOW THIS SCHEDULE WAS BUILT:")
-    lines.append("Each week's drivers were chosen based on:")
+    lines.append("Each week's drivers were chosen with these principles in mind:")
     lines.append("  \u2022 Availability (drivers who marked that Sunday as free)")
     lines.append(
         "  \u2022 Fairness (spreading drives evenly across everyone, "
         "roughly 4-5 times each this semester)"
     )
     lines.append(
-        "  \u2022 No back-to-back weeks for the same driver when another "
-        "option was available"
+        "  \u2022 No one drives more than 2 Sundays in a row"
     )
     lines.append(
         "  \u2022 Younger drivers (Josiah, Ryan, Sangwoo) on the newer "
@@ -242,6 +241,8 @@ def _build_schedule_body(
         lines.append(f"  \U0001f690 Shuttle 1 (Gray Van): {_format_shuttle_driver_text(entry, 'shuttle_1')}")
         lines.append(f"  \U0001f690 Shuttle 2 (Silver Van): {_format_shuttle_driver_text(entry, 'shuttle_2')}")
         lines.append(f"  \U0001f504 Backup: {backup if backup else 'No backup this week'}")
+        if entry.get("note"):
+            lines.append(f"  \U0001f4dd Why: {entry['note']}")
         lines.append("")
 
     lines.append(_SECTION_DIVIDER)
