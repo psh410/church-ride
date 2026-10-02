@@ -30,6 +30,7 @@ RIDER_REMINDERS_COLLECTION = "rider_reminders_sent"
 RETURN_RIDE_REQUESTS_COLLECTION = "return_ride_requests"
 RETURN_RIDE_COUNTS_COLLECTION = "return_ride_counts"
 RIDE_CANCELLATIONS_COLLECTION = "ride_cancellations"
+DRIVER_CHANGE_SESSIONS_COLLECTION = "driver_change_sessions"
 
 # --------------------------------------------------------------------------
 # Client initialization
@@ -1112,3 +1113,106 @@ def clear_return_ride_request(phone: str, sunday_date: str) -> bool:
             f"Failed to clear return ride request for phone={phone!r} "
             f"date={sunday_date!r}: {exc}"
         ) from exc
+
+
+# --------------------------------------------------------------------------
+# Driver change sessions (the CHANGE keyword's two-step flow)
+# --------------------------------------------------------------------------
+# Changing a driver takes three texts: the admin asks, picks a slot by
+# number, then picks a driver by number. The numbers only mean anything
+# against the list they were sent with, so that list has to be stored
+# between texts rather than rebuilt, or a roster that shifts mid-flow
+# would silently reassign the wrong person.
+#
+# Keyed by phone, so two admins can be mid-flow at once without seeing
+# each other's numbers.
+
+# How long a half-finished flow stays answerable. Short on purpose: a
+# stray "2" typed hours later must not reassign a driver, and these are
+# decisions made in a few minutes on a Saturday night.
+DRIVER_CHANGE_SESSION_TTL_SECONDS = 15 * 60
+
+
+def get_driver_change_session(phone: str) -> dict | None:
+    """Return this admin's in-progress driver change, if it is still live.
+
+    An expired session is treated as absent AND deleted, so a late reply
+    gets "that expired, text CHANGE to start again" rather than silently
+    acting on a stale list.
+
+    Args:
+        phone: The admin's number, E.164 preferred.
+
+    Returns:
+        dict or None: The stored session, or None when there is none or
+            it has expired.
+
+    Raises:
+        RuntimeError: If the lookup fails.
+    """
+    from datetime import datetime, timezone
+
+    try:
+        client = get_client()
+        doc = client.collection(DRIVER_CHANGE_SESSIONS_COLLECTION).document(phone).get()
+        if not doc.exists:
+            return None
+
+        data = doc.to_dict() or {}
+        expires_at = data.get("expires_at")
+        if expires_at is None:
+            return data
+
+        now = datetime.now(timezone.utc)
+        # Firestore hands back an aware datetime; be tolerant anyway.
+        if getattr(expires_at, "tzinfo", None) is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        if expires_at <= now:
+            clear_driver_change_session(phone)
+            return None
+
+        return data
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to read driver change session for {phone!r}: {exc}"
+        ) from exc
+
+
+def set_driver_change_session(phone: str, data: dict) -> None:
+    """Store this admin's in-progress driver change, with a fresh expiry.
+
+    Args:
+        phone: The admin's number, E.164 preferred.
+        data: Whatever the flow needs to interpret the next reply.
+
+    Raises:
+        RuntimeError: If the write fails.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    payload = dict(data)
+    payload["expires_at"] = datetime.now(timezone.utc) + timedelta(
+        seconds=DRIVER_CHANGE_SESSION_TTL_SECONDS
+    )
+    try:
+        client = get_client()
+        client.collection(DRIVER_CHANGE_SESSIONS_COLLECTION).document(phone).set(payload)
+    except Exception as exc:
+        raise RuntimeError(
+            f"Failed to store driver change session for {phone!r}: {exc}"
+        ) from exc
+
+
+def clear_driver_change_session(phone: str) -> None:
+    """Delete this admin's in-progress driver change. Never raises.
+
+    Called on completion, on cancel, and on expiry. A failure here leaves
+    a stale session that expires on its own, which is why it is logged
+    rather than raised: the change itself has already happened and
+    reporting it as failed would be worse than a dangling document.
+    """
+    try:
+        client = get_client()
+        client.collection(DRIVER_CHANGE_SESSIONS_COLLECTION).document(phone).delete()
+    except Exception as exc:
+        logger.warning("Could not clear driver change session for %s: %s", phone, exc)

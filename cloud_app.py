@@ -769,6 +769,61 @@ def confirm_rider_signup():
         return jsonify({"status": "error", "error": str(exc)}), 500
 
 
+def _handle_driver_change(phone: str, body: str) -> str | None:
+    """Drive the CHANGE flow one step, or return None to route normally.
+
+    Returns None when a bare number arrives with no change in progress,
+    so a stray digit falls through to the ordinary keyword handling and
+    ends up answered with silence rather than a confusing menu error.
+    """
+    from functions.driver_change import (
+        CANCEL_REPLY,
+        apply_driver_change,
+        build_driver_menu,
+        build_slot_menu,
+        is_numeric_reply,
+        matches_change_keyword,
+    )
+    from db.firestore_client import (
+        clear_driver_change_session,
+        get_driver_change_session,
+    )
+
+    if matches_change_keyword(body):
+        return build_slot_menu(phone)
+
+    try:
+        session = get_driver_change_session(phone)
+    except Exception as exc:
+        logger.error("Could not read driver change session: %s", exc)
+        return (
+            "CFC Rides: couldn't pick that up just now. Text CHANGE to "
+            "start again."
+        )
+
+    if session is None:
+        # No flow, or it expired. Expired is the interesting case: the
+        # admin is answering a menu whose numbers no longer mean
+        # anything, so say so rather than acting on it.
+        return None
+
+    if body.strip() == CANCEL_REPLY:
+        clear_driver_change_session(phone)
+        return "CFC Rides: Cancelled. Nothing was changed."
+
+    if not is_numeric_reply(body):
+        return None
+
+    choice = int(body.strip())
+    if session.get("step") == "slot":
+        return build_driver_menu(phone, session, choice)
+    if session.get("step") == "driver":
+        return apply_driver_change(phone, session, choice)
+
+    clear_driver_change_session(phone)
+    return "CFC Rides: that got into an odd state. Text CHANGE to start again."
+
+
 @app.route("/sms-webhook", methods=["POST"])
 def sms_webhook():
     """Handle incoming SMS from Twilio: opt-out, opt-in, and keywords.
@@ -807,6 +862,10 @@ def sms_webhook():
       capacity, so Dae and Sarah can see whether personal drivers are
       needed. With any argument it sends every rider and destination,
       split across numbered parts. Same allowlist as UPDATE.
+    - Driver change (CHANGE, or DRIVER CHANGE). A guided three text
+      flow for the admin allowlist: slots numbered, roster numbered,
+      then everyone involved is told. A bare number is read as an
+      answer to that menu only while one is in progress.
     - Ride cancellation (SKIP, plus the unadvertised aliases NORIDE,
       OUT and CANT). Answers the Saturday night reminder: gives up that
       Sunday's seat, records it, and flags the signup row. Authorized by
@@ -919,6 +978,33 @@ def sms_webhook():
             )
 
             from functions.rider_reminder import SKIP_KEYWORDS, build_skip_reply
+
+            # Only the two matchers here; _handle_driver_change imports
+            # the rest, so the routing block stays a routing block.
+            from functions.driver_change import (
+                is_numeric_reply,
+                matches_change_keyword,
+            )
+
+            # A bare number only means something while this admin has a
+            # driver change half finished, so it is checked first and
+            # falls through to normal routing otherwise. Nothing else in
+            # this system is a number, so no keyword is shadowed.
+            if matches_change_keyword(body) or is_numeric_reply(body):
+                if not is_admin_phone(normalized):
+                    logger.warning(
+                        "Ignoring %s from non-admin number %s.", body, normalized
+                    )
+                else:
+                    reply = _handle_driver_change(normalized, body)
+                    if reply is not None:
+                        from xml.sax.saxutils import escape
+
+                        return (
+                            f"<Response><Message>{escape(reply)}</Message></Response>",
+                            200,
+                            {"Content-Type": "text/xml"},
+                        )
 
             if body in DRIVER_LOOKUP_KEYWORDS:
                 # Authorization comes from the driver roster itself: a
