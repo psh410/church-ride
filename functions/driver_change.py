@@ -43,6 +43,7 @@ CHANGE_KEYWORDS = {"CHANGE", "DRIVER CHANGE", "DRIVERCHANGE", "CHANGE DRIVER"}
 # Replying 0 backs out. Not CANCEL, which Twilio intercepts as an
 # opt-out and never delivers to us.
 CANCEL_REPLY = "0"
+CANCEL_HINT = f"Reply with a number, or {CANCEL_REPLY} to exit."
 
 _SHUTTLES = ("shuttle_1", "shuttle_2")
 _LEGS = ("pickup", "return")
@@ -94,9 +95,8 @@ def build_slot_menu(phone: str, sunday_date: str | None = None) -> str:
     slots = _slots_for(entry)
     lines = [f"{BRAND_PREFIX} Change a driver for {_short(sunday_date)}:"]
     for index, slot in enumerate(slots, start=1):
-        who = slot["current"] or "unassigned"
-        lines.append(f"{index}. {slot['label']} {who}")
-    lines.append(f"Reply with a number, or {CANCEL_REPLY} to cancel.")
+        lines.append(f"{index}. {_menu_row(slot)}")
+    lines.append(CANCEL_HINT)
 
     try:
         set_driver_change_session(
@@ -136,6 +136,8 @@ def _slots_for(entry: dict) -> list[dict]:
             slots.append(
                 {
                     "label": label,
+                    "slot": label,
+                    "leg": "",
                     "current": pickup,
                     # Writing the base field and clearing the leg fields
                     # keeps a whole-day assignment whole, rather than
@@ -148,7 +150,15 @@ def _slots_for(entry: dict) -> list[dict]:
             for leg, who in (("pickup", pickup), ("return", ret)):
                 slots.append(
                     {
+                        # "label" stays the prose form ("S1 return"),
+                        # because sentences elsewhere need it as a unit:
+                        # "You're off S1 return for 10/4". The menu
+                        # renders from "slot" and "leg" instead, so the
+                        # driver's name sits next to the slot rather
+                        # than behind a qualifier.
                         "label": f"{label} {leg}",
+                        "slot": label,
+                        "leg": leg,
                         "current": who,
                         "fields": [f"{shuttle}_{leg}"],
                         "clear": [],
@@ -158,6 +168,8 @@ def _slots_for(entry: dict) -> list[dict]:
     slots.append(
         {
             "label": _LABELS["backup"],
+            "slot": _LABELS["backup"],
+            "leg": "",
             "current": entry.get("backup"),
             "fields": ["backup"],
             "clear": [],
@@ -181,7 +193,7 @@ def build_driver_menu(phone: str, session: dict, choice: int) -> str:
     if not 1 <= choice <= len(slots):
         return (
             f"{BRAND_PREFIX} Pick a number between 1 and {len(slots)}, "
-            f"or {CANCEL_REPLY} to cancel."
+            f"or {CANCEL_REPLY} to exit."
         )
 
     slot = slots[choice - 1]
@@ -204,7 +216,7 @@ def build_driver_menu(phone: str, session: dict, choice: int) -> str:
     for index, driver in enumerate(drivers, start=1):
         mark = "" if driver["available"] else " (not available)"
         lines.append(f"{index}. {driver['name']}{mark}")
-    lines.append(f"Reply with a number, or {CANCEL_REPLY} to cancel.")
+    lines.append(CANCEL_HINT)
 
     try:
         set_driver_change_session(
@@ -221,6 +233,18 @@ def build_driver_menu(phone: str, session: dict, choice: int) -> str:
         return f"{BRAND_PREFIX} Couldn't continue just now. Text CHANGE to retry."
 
     return "\n".join(lines)
+
+
+def _menu_row(slot: dict) -> str:
+    """One numbered menu line: the slot, then who holds it, then the leg.
+
+    "S1 Sangwoo Kim pickup" rather than "S1 pickup Sangwoo Kim". The
+    name is what the admin is scanning for, so it should not sit behind
+    a qualifier. The leg trails as the thing that distinguishes two
+    lines sharing a shuttle.
+    """
+    who = slot["current"] or "unassigned"
+    return " ".join(part for part in (slot.get("slot") or slot["label"], who, slot.get("leg")) if part)
 
 
 def _roster_for(sunday_date: str) -> list[dict]:
@@ -260,7 +284,7 @@ def apply_driver_change(phone: str, session: dict, choice: int) -> str:
     if not 1 <= choice <= len(drivers):
         return (
             f"{BRAND_PREFIX} Pick a number between 1 and {len(drivers)}, "
-            f"or {CANCEL_REPLY} to cancel."
+            f"or {CANCEL_REPLY} to exit."
         )
 
     slot = session["slot"]

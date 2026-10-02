@@ -85,6 +85,23 @@ def test_a_normal_week_is_three_slots():
           f"expected three slots, got {[s['label'] for s in slots]}")
 
 
+def test_the_menu_puts_the_name_before_the_leg():
+    # "S1 Sangwoo Kim pickup", not "S1 pickup Sangwoo Kim". The name is
+    # what the admin scans for and should not sit behind a qualifier.
+    rows = [dc._menu_row(s) for s in dc._slots_for(SPLIT)]
+    check(rows[1] == "S2 Yong Kim pickup", f"got {rows[1]!r}")
+    check(rows[2] == "S2 Daniel Park return", f"got {rows[2]!r}")
+    check(rows[0] == "S1 Sangwoo Kim", f"an unsplit slot carries no leg: {rows[0]!r}")
+    check(rows[3] == "Backup Albert Lee", f"got {rows[3]!r}")
+
+
+def test_an_unassigned_slot_reads_as_unassigned_in_the_menu():
+    entry = dict(WHOLE_DAY)
+    entry["backup"] = ""
+    row = dc._menu_row(dc._slots_for(entry)[-1])
+    check(row == "Backup unassigned", f"got {row!r}")
+
+
 def test_a_split_shuttle_becomes_two_lines():
     # Collapsing this would mean picking "S2" replaced a driver the
     # admin never saw.
@@ -148,7 +165,7 @@ def test_the_whole_roster_is_offered_with_unavailable_marked():
           f"unavailable drivers should be offered and marked: {reply!r}")
     check("Sangwoo Kim" in reply and "Sangwoo Kim (not available)" not in reply,
           "available drivers should carry no mark")
-    check("0 to cancel" in reply, "every menu should say how to back out")
+    check("0 to exit" in reply, "every menu should say how to back out")
 
 
 def test_an_out_of_range_pick_asks_again_without_changing_anything():
